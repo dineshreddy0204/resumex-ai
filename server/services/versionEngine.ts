@@ -19,11 +19,11 @@ export interface VersionComparisonResult {
 }
 
 export class VersionEngine {
-  public compareVersions(
+  public async compareVersions(
     verA: ResumeVersion,
     verB: ResumeVersion,
     targetJob?: JobDescriptionModel
-  ): VersionComparisonResult {
+  ): Promise<VersionComparisonResult> {
     const scoreAOverall = verA.score?.overall ?? 0;
     const scoreBOverall = verB.score?.overall ?? 0;
     const overallDelta = scoreBOverall - scoreAOverall;
@@ -32,8 +32,8 @@ export class VersionEngine {
     // Optional JD matching comparison
     let jdMatchDelta: number | undefined;
     if (targetJob) {
-      const matchA = semanticMatcher.matchResumeToJob(verA.resumeData, targetJob);
-      const matchB = semanticMatcher.matchResumeToJob(verB.resumeData, targetJob);
+      const matchA = await semanticMatcher.matchResumeToJob(verA.resumeData, targetJob);
+      const matchB = await semanticMatcher.matchResumeToJob(verB.resumeData, targetJob);
       jdMatchDelta = (matchB.overallMatch ?? 0) - (matchA.overallMatch ?? 0);
     }
 

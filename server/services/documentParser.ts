@@ -1,5 +1,6 @@
 import mammoth from 'mammoth';
 import { createRequire } from 'module';
+import { getGeminiClient, isGeminiAvailable } from '../gemini';
 
 const require = createRequire(import.meta.url);
 const pdfParse = require('pdf-parse');
@@ -87,17 +88,53 @@ export class DocumentParser {
   }
 
   /**
-   * OCR Fallback Service abstraction
+   * OCR Fallback Service: attempts Gemini multimodal document vision extraction
+   * for image-only or scanned PDFs lacking a selectable text layer.
    */
   private async performOcrFallback(buffer: Buffer): Promise<string> {
-    // Check if buffer contains stream text or standard fallback
+    // 1. Check if buffer contains stream text
     const fallbackText = this.extractPdfTextFallback(buffer);
-    if (fallbackText && fallbackText.trim().length > 50) {
+    if (fallbackText && fallbackText.trim().length > 60) {
       return fallbackText;
     }
-    // If truly an image-only scan
+
+    // 2. Multimodal OCR via Gemini
+    if (isGeminiAvailable()) {
+      try {
+        const client = getGeminiClient();
+        if (client) {
+          const resp = await client.models.generateContent({
+            model: 'gemini-2.5-flash',
+            contents: [
+              {
+                role: 'user',
+                parts: [
+                  {
+                    inlineData: {
+                      mimeType: 'application/pdf',
+                      data: buffer.toString('base64'),
+                    },
+                  },
+                  {
+                    text: 'Perform verbatim OCR transcription of this resume document. Extract all readable text, preserving full sections, candidate contact details, work history bullets, metrics, and technical skills. Return pure extracted text with standard section headings.',
+                  },
+                ],
+              },
+            ],
+          });
+
+          if (resp.text && resp.text.trim().length > 40) {
+            return resp.text.trim();
+          }
+        }
+      } catch (ocrErr) {
+        console.warn('[DocumentParser] Multimodal OCR attempt encountered an issue:', ocrErr);
+      }
+    }
+
+    // 3. Fail gracefully if unreadable
     throw new Error(
-      'Document appears to be a scanned image or photograph without an accessible text layer. ResumeX AI requires machine-readable text for accurate ATS scoring and semantic entity extraction. Please upload an exported PDF or DOCX.'
+      'The uploaded document has no extractable text layer and automated OCR could not transcribe it. Please upload a digital PDF or DOCX exported directly from a word processor.'
     );
   }
 

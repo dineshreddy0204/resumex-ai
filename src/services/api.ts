@@ -53,7 +53,11 @@ class ApiClient {
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({ error: 'Request failed' }));
-      throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`);
+      const message =
+        errorData && errorData.error && typeof errorData.error === 'object'
+          ? errorData.error.message
+          : errorData.error || `HTTP ${response.status}: ${response.statusText}`;
+      throw new Error(message);
     }
 
     return response.json();
@@ -77,8 +81,26 @@ class ApiClient {
     return data;
   }
 
-  public async signup(name: string, email: string, password: string): Promise<{ user: User; profile: UserProfile; token?: string; verificationRequired?: boolean; verificationToken?: string }> {
-    const data = await this.request<{ user: User; profile: UserProfile; token?: string; verificationRequired?: boolean; verificationToken?: string }>('/auth/signup', {
+  public async signup(
+    name: string,
+    email: string,
+    password: string
+  ): Promise<{
+    user: User;
+    profile?: UserProfile;
+    token?: string;
+    requiresVerification?: boolean;
+    message?: string;
+    devVerificationUrl?: string;
+  }> {
+    const data = await this.request<{
+      user: User;
+      profile?: UserProfile;
+      token?: string;
+      requiresVerification?: boolean;
+      message?: string;
+      devVerificationUrl?: string;
+    }>('/auth/signup', {
       method: 'POST',
       body: JSON.stringify({ name, email, password }),
     });
@@ -97,10 +119,10 @@ class ApiClient {
     return data;
   }
 
-  public async googleAuth(email: string, name?: string, googleId?: string): Promise<{ user: User; profile: UserProfile; token: string }> {
+  public async googleAuth(idToken: string): Promise<{ user: User; profile: UserProfile; token: string }> {
     const data = await this.request<{ user: User; profile: UserProfile; token: string }>('/auth/google', {
       method: 'POST',
-      body: JSON.stringify({ email, name, googleId }),
+      body: JSON.stringify({ idToken }),
     });
     this.setToken(data.token);
     return data;

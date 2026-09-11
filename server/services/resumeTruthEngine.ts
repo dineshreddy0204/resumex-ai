@@ -9,7 +9,14 @@ export type TruthVerificationStatus =
   | 'BLOCKED_UNTRUTHFUL';
 
 export interface TruthViolation {
-  type: 'fabricated_metric' | 'invented_skill' | 'invented_company' | 'invented_degree' | 'unsupported_claim';
+  type:
+    | 'fabricated_metric'
+    | 'invented_skill'
+    | 'invented_company'
+    | 'invented_title'
+    | 'invented_degree'
+    | 'invented_certification'
+    | 'unsupported_claim';
   claim: string;
   reason: string;
   questionToUser?: string;
@@ -28,8 +35,16 @@ export interface TruthVerificationResult {
 
 export class ResumeTruthEngine {
   /**
-   * Validates an AI rewrite against user-provided facts and full resume knowledge base.
-   * Prevents AI hallucination: zero fabricated metrics, skills, companies, degrees.
+   * Validates an AI rewrite against user-provided facts and verified resume profile records.
+   * STRICT ANTI-HALLUCINATION ENFORCEMENT:
+   * AI MUST NEVER invent:
+   * - metrics (percentages, revenues, user counts, performance multiples)
+   * - employers / companies
+   * - job titles
+   * - skills / technologies
+   * - certifications
+   * - degrees
+   * - dates
    */
   public verifyRewrite(originalText: string, proposedText: string, resumeContext: ResumeData): TruthVerificationResult {
     const violations: TruthViolation[] = [];
@@ -45,16 +60,19 @@ export class ResumeTruthEngine {
           claim: propMetric,
           severity: 'HIGH',
           reason: `The rewrite introduces an unverified metric ("${propMetric}") that does not exist in your source resume. ResumeX AI forbids fabricating performance data.`,
-          questionToUser: `Can you verify "${propMetric}" with measurable project logs or team reporting? If not, state the qualitative impact or your actual number.`,
+          questionToUser: `Did you actually achieve "${propMetric}"? If verified, please confirm; otherwise provide your exact measured outcome.`,
         });
       }
     }
 
-    // 2. Skill verification: ensure AI doesn't inject technologies absent from entire resume
+    // 2. Skill & Technology verification: ensure AI doesn't inject technologies absent from entire resume
     const originalSkills = new Set(skillExtractor.extractSkills(originalText).map((s) => s.normalizedName));
     const allResumeSkills = new Set<string>();
-    for (const g of resumeContext.skills) {
-      for (const s of g.items) allResumeSkills.add(skillExtractor.normalizeSkill(s));
+    for (const g of resumeContext.skills || []) {
+      for (const s of g.items || []) allResumeSkills.add(skillExtractor.normalizeSkill(s));
+    }
+    for (const exp of resumeContext.experience || []) {
+      for (const t of exp.technologies || []) allResumeSkills.add(skillExtractor.normalizeSkill(t));
     }
     const proposedSkills = skillExtractor.extractSkills(proposedText);
 
@@ -65,13 +83,13 @@ export class ResumeTruthEngine {
           claim: ps.normalizedName,
           severity: 'HIGH',
           reason: `The proposed text claims proficiency in "${ps.normalizedName}", which is absent from your verified skills inventory.`,
-          questionToUser: `Did you directly use "${ps.normalizedName}" during this position?`,
+          questionToUser: `Did you directly use "${ps.normalizedName}" during this role?`,
         });
       }
     }
 
-    // 3. Hallucinated degree or company keywords check
-    const degreesRegex = /\b(phd|master'?s|bachelor'?s|mba|doctorate|associate'?s)\b/gi;
+    // 3. Hallucinated degree check
+    const degreesRegex = /\b(phd|master'?s|bachelor'?s|mba|doctorate|associate'?s|b\.s\.|m\.s\.)\b/gi;
     const origDegreeMatches = originalText.match(degreesRegex) || [];
     const propDegreeMatches = proposedText.match(degreesRegex) || [];
     if (propDegreeMatches.length > origDegreeMatches.length) {
@@ -79,41 +97,79 @@ export class ResumeTruthEngine {
         type: 'invented_degree',
         claim: propDegreeMatches[0],
         severity: 'BLOCKER',
-        reason: 'The proposed text references an academic degree not found in the source bullet.',
+        reason: 'The proposed text references an academic degree not found in the source text.',
       });
     }
 
-    // 4. Status determination
-    let status: TruthVerificationStatus = 'VERIFIED';
-    let verdict: TruthVerificationResult['verdict'] = 'PASS';
-    let explanation = 'All facts and technical claims are substantiated by your profile records.';
-
-    if (violations.some((v) => v.type === 'invented_degree' || v.severity === 'BLOCKER')) {
-      status = 'BLOCKED_UNTRUTHFUL';
-      verdict = 'BLOCKED';
-      explanation = 'Blocked: The rewrite introduces severe factual hallucinations (e.g. unverified degrees or credentials).';
-    } else if (violations.some((v) => v.type === 'fabricated_metric')) {
-      status = 'FABRICATED_METRIC';
-      verdict = 'REQUIRES_CONFIRMATION';
-      explanation = 'Flagged: Generated bullet points contain specific metrics that must be verified by you before inclusion.';
-    } else if (violations.some((v) => v.type === 'invented_skill')) {
-      status = 'UNSUPPORTED_CLAIM';
-      verdict = 'REQUIRES_CONFIRMATION';
-      explanation = 'Flagged: Contains technologies not found in your skills list.';
-    } else if (originalText !== proposedText) {
-      status = 'ENHANCED_WITH_EXISTING_FACTS';
-      explanation = 'Verified: Rewritten using strong action verbs and verified resume context without fabricating new claims.';
-    }
-
-    // 5. Clean output generation: neutralize unsupported metrics with bracketed placeholders
-    let cleanOutput = proposedText;
-    if (violations.some((v) => v.type === 'fabricated_metric')) {
-      for (const v of violations.filter((vi) => vi.type === 'fabricated_metric')) {
-        cleanOutput = cleanOutput.replace(new RegExp(`\\b${this.escapeRegex(v.claim)}\\b`, 'g'), `[verified ${v.claim}]`);
+    // 4. Hallucinated certification check
+    const certRegex = /\b(aws certified|pmp|cissp|scrum master|cka|ckad|gcp professional)\b/gi;
+    const origCertMatches = originalText.match(certRegex) || [];
+    const propCertMatches = proposedText.match(certRegex) || [];
+    const userCerts = new Set((resumeContext.certifications || []).map((c) => c.name.toLowerCase()));
+    for (const cm of propCertMatches) {
+      const lowerCm = cm.toLowerCase();
+      if (!origCertMatches.some((oc) => oc.toLowerCase().includes(lowerCm)) && !Array.from(userCerts).some((uc) => uc.includes(lowerCm))) {
+        violations.push({
+          type: 'invented_certification',
+          claim: cm,
+          severity: 'BLOCKER',
+          reason: `The proposed text introduces an unverified professional credential ("${cm}").`,
+          questionToUser: `Have you received the official "${cm}" certification?`,
+        });
       }
     }
 
-    const confidenceScore = violations.length === 0 ? 1.0 : Math.max(0.4, 1.0 - violations.length * 0.2);
+    // 5. Hallucinated Employer / Company check
+    const knownCompanies = new Set((resumeContext.experience || []).map((e) => e.company.toLowerCase()));
+    const companyKeywords = proposedText.match(/\b(?:at|for|joined)\s+([A-Z][a-zA-Z0-9]+(?:\s+[A-Z][a-zA-Z0-9]+)?)\b/g) || [];
+    for (const ck of companyKeywords) {
+      const companyName = ck.replace(/\b(?:at|for|joined)\s+/i, '').trim().toLowerCase();
+      if (companyName.length > 3 && !['scale', 'speed', 'enterprise', 'production'].includes(companyName)) {
+        const inOrig = originalText.toLowerCase().includes(companyName);
+        const inHistory = Array.from(knownCompanies).some((kc) => kc.includes(companyName));
+        if (!inOrig && !inHistory) {
+          violations.push({
+            type: 'invented_company',
+            claim: companyName,
+            severity: 'BLOCKER',
+            reason: `The proposed text references employer or organization "${companyName}" absent from your work history.`,
+            questionToUser: `Did you work at or partner with "${companyName}"?`,
+          });
+        }
+      }
+    }
+
+    // 6. Status determination
+    let status: TruthVerificationStatus = 'VERIFIED';
+    let verdict: TruthVerificationResult['verdict'] = 'PASS';
+    let explanation = 'All facts, metrics, and technical claims are verified against your source records.';
+
+    if (violations.some((v) => v.severity === 'BLOCKER')) {
+      status = 'BLOCKED_UNTRUTHFUL';
+      verdict = 'BLOCKED';
+      explanation = 'Blocked: The rewrite introduces severe factual hallucinations (unverified degrees, employers, or certifications).';
+    } else if (violations.some((v) => v.type === 'fabricated_metric')) {
+      status = 'FABRICATED_METRIC';
+      verdict = 'REQUIRES_CONFIRMATION';
+      explanation = 'Flagged: Generated text contains specific metrics that must be verified before inclusion.';
+    } else if (violations.some((v) => v.type === 'invented_skill')) {
+      status = 'UNSUPPORTED_CLAIM';
+      verdict = 'REQUIRES_CONFIRMATION';
+      explanation = 'Flagged: Contains technologies not present in your verified skill inventory.';
+    } else if (originalText !== proposedText) {
+      status = 'ENHANCED_WITH_EXISTING_FACTS';
+      explanation = 'Verified: Rewritten using strong action verbs and substantiated context without inventing facts.';
+    }
+
+    // 7. Clean output generation
+    let cleanOutput = proposedText;
+    if (violations.some((v) => v.type === 'fabricated_metric')) {
+      for (const v of violations.filter((vi) => vi.type === 'fabricated_metric')) {
+        cleanOutput = cleanOutput.replace(new RegExp(`\\b${this.escapeRegex(v.claim)}\\b`, 'g'), `[measured ${v.claim}]`);
+      }
+    }
+
+    const confidenceScore = violations.length === 0 ? 1.0 : Math.max(0.3, 1.0 - violations.length * 0.2);
 
     return {
       isCompliant: violations.length === 0,

@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS resumes (
     current_version_id VARCHAR(64),
     ats_score INTEGER DEFAULT 85,
     score_json JSONB,
+    data_json JSONB,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
@@ -178,6 +179,7 @@ CREATE TABLE IF NOT EXISTS job_descriptions (
     domain_keywords_json JSONB,
     responsibilities_json JSONB,
     experience_years_required INTEGER DEFAULT 3,
+    seniority_level VARCHAR(64) DEFAULT 'Mid',
     education_required BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
@@ -293,3 +295,30 @@ CREATE TABLE IF NOT EXISTS audit_events (
 
 CREATE INDEX IF NOT EXISTS idx_audit_user_id ON audit_events(user_id);
 CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_events(action);
+
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id VARCHAR(64) PRIMARY KEY,
+    user_id VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+    action VARCHAR(128) NOT NULL,
+    entity_type VARCHAR(64),
+    entity_id VARCHAR(64),
+    resource_type VARCHAR(64),
+    resource_id VARCHAR(64),
+    details_json JSONB,
+    ip_address VARCHAR(64),
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_logs_user_id ON audit_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_action ON audit_logs(action);
+
+CREATE TABLE IF NOT EXISTS career_gaps (
+    id VARCHAR(64) PRIMARY KEY,
+    user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    target_role VARCHAR(255) NOT NULL,
+    analysis_json JSONB NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_career_gaps_user_role ON career_gaps(user_id, target_role);

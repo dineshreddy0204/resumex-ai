@@ -67,14 +67,21 @@ export const AuthModal: React.FC<AuthModalProps> = ({
           return;
         }
         const res = await api.signup(name.trim(), email.trim(), password);
-        if (res.verificationRequired && res.verificationToken) {
-          // Display verification step and prefill token for immediate sandbox confirmation
-          setVerifyToken(res.verificationToken);
-          setVerifyPromptNotice(
-            `Account created for ${email}. We've generated a secure single-use verification token below.`
-          );
+        if (res.requiresVerification) {
           setMode('verify');
-          showToast('info', 'Please verify your email address to complete registration.');
+          showToast('info', res.message || 'Please verify your email address to complete registration.');
+          if (res.devVerificationUrl) {
+            const urlObj = new URL(res.devVerificationUrl);
+            const devToken = urlObj.searchParams.get('token');
+            if (devToken) {
+              setVerifyToken(devToken);
+            }
+            setVerifyPromptNotice(
+              `Email dispatched to ${email}. In local dev mode, your token has been detected from the dev logger.`
+            );
+          } else {
+            setVerifyPromptNotice(`A verification email was sent to ${email}. Please enter the token from your email.`);
+          }
         } else if (res.user && res.profile) {
           showToast('success', `Account created! Welcome, ${res.user.name}.`);
           onSuccess(res.user, res.profile);
@@ -106,13 +113,35 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setLoading(true);
     setErrorMessage(null);
     try {
-      // Simulate Google GSI client authorization
-      const googleUserEmail = email.trim() || 'candidate.google@resumex.ai';
-      const googleUserName = name.trim() || 'Google Candidate';
-      const res = await api.googleAuth(googleUserEmail, googleUserName, 'google-sub-mock-12345');
-      showToast('success', `Signed in with Google as ${res.user.email}`);
-      onSuccess(res.user, res.profile);
-      onClose();
+      const googleClientId = (import.meta as any).env?.VITE_GOOGLE_CLIENT_ID;
+      if (!googleClientId) {
+        setErrorMessage(
+          'Google OAuth credentials are not configured in this environment (VITE_GOOGLE_CLIENT_ID is not set). Please use standard email registration or explore the Demo Sandbox.'
+        );
+        return;
+      }
+
+      // If Google Client ID is configured, check for Google Identity Services SDK
+      if (typeof window !== 'undefined' && (window as any).google?.accounts?.id) {
+        (window as any).google.accounts.id.initialize({
+          client_id: googleClientId,
+          callback: async (response: { credential: string }) => {
+            try {
+              const res = await api.googleAuth(response.credential);
+              showToast('success', `Signed in with Google as ${res.user.email}`);
+              onSuccess(res.user, res.profile);
+              onClose();
+            } catch (err: any) {
+              setErrorMessage(err.message || 'Google token validation failed on the backend.');
+            }
+          },
+        });
+        (window as any).google.accounts.id.prompt();
+      } else {
+        setErrorMessage(
+          'Google Identity Services client library is loading or blocked. Please verify network connectivity or use email signup.'
+        );
+      }
     } catch (err: any) {
       setErrorMessage(err.message || 'Google authentication failed.');
     } finally {

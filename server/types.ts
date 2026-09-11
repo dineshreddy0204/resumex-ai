@@ -21,6 +21,7 @@ export interface UserProfile {
   targetIndustry?: string;
   yearsOfExperience: number;
   location: string;
+  bio?: string;
   primaryResumeId?: string;
 }
 
@@ -46,6 +47,7 @@ export interface ResumeData {
     location?: string;
     startDate: string;
     endDate: string; // or "Present"
+    current?: boolean;
     bullets: string[];
     technologies?: string[];
   }[];
@@ -54,6 +56,7 @@ export interface ResumeData {
     institution: string;
     degree: string;
     fieldOfStudy?: string;
+    field?: string;
     startDate: string;
     endDate: string;
     gpa?: string;
@@ -72,6 +75,8 @@ export interface ResumeData {
     name: string;
     issuer: string;
     date: string;
+    issueDate?: string;
+    link?: string;
     credentialId?: string;
   }[];
   achievements: {
@@ -79,6 +84,7 @@ export interface ResumeData {
     title: string;
     description: string;
     date?: string;
+    metric?: string;
   }[];
   publications?: {
     id: string;
@@ -119,6 +125,7 @@ export interface AnalysisIssue {
     | 'non_standard_heading'
     | 'keyword_gap'
     | 'overlong_sentence';
+  type?: string;
   severity: 'high' | 'medium' | 'low';
   section: string;
   evidence: string;
@@ -183,6 +190,7 @@ export interface JobDescriptionModel {
   userId: string;
   title: string;
   company?: string;
+  location?: string;
   rawText: string;
   requiredSkills: string[];
   preferredSkills: string[];

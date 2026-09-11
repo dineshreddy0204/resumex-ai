@@ -1,8 +1,8 @@
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
-import bcrypt from 'bcryptjs';
-import { Pool } from 'pg';
+import { Pool, type PoolClient } from 'pg';
+import { hashPassword, verifyPassword } from './auth';
 import type {
   User,
   UserProfile,
@@ -15,12 +15,6 @@ import type {
   AuditEvent,
   CareerGapAnalysis,
 } from './types';
-
-// Optional PostgreSQL connection if DATABASE_URL is configured
-const hasDatabaseUrl = !!process.env.DATABASE_URL;
-if (!hasDatabaseUrl && process.env.NODE_ENV === 'production') {
-  console.warn('[Database] DATABASE_URL not set in environment. Using robust persistent local storage engine.');
-}
 
 export interface StoredResume {
   id: string;
@@ -39,782 +33,145 @@ export interface StoredResume {
   updatedAt: string;
 }
 
-interface PersistedState {
-  users: Record<string, User>;
-  profiles: Record<string, UserProfile>;
-  resumes: Record<string, StoredResume>;
-  versions: Record<string, ResumeVersion[]>;
-  jobDescriptions: Record<string, JobDescriptionModel>;
-  jobMatches: Record<string, JobMatchResult>;
-  issues: Record<string, AnalysisIssue[]>;
-  careerGaps: Record<string, CareerGapAnalysis>;
-  auditEvents: AuditEvent[];
-}
-
 export class DatabaseEngine {
-  private users: Map<string, User> = new Map();
-  private profiles: Map<string, UserProfile> = new Map();
-  private resumes: Map<string, StoredResume> = new Map();
-  private versions: Map<string, ResumeVersion[]> = new Map(); // resumeId -> versions
-  private jobDescriptions: Map<string, JobDescriptionModel> = new Map();
-  private jobMatches: Map<string, JobMatchResult> = new Map(); // `${resumeId}_${jobId}` -> match
-  private issues: Map<string, AnalysisIssue[]> = new Map(); // resumeId -> issues
-  private careerGaps: Map<string, CareerGapAnalysis> = new Map(); // `${userId}_${role}` -> gap
-  private auditEvents: AuditEvent[] = [];
-
-  private storageFile: string;
-  private pgPool: Pool | null = null;
+  private pgPool: Pool;
+  private isInitialized: boolean = false;
+  private initPromise: Promise<void> | null = null;
 
   constructor() {
-    const dataDir = path.join(process.cwd(), '.data');
-    if (!fs.existsSync(dataDir)) {
-      try {
-        fs.mkdirSync(dataDir, { recursive: true });
-      } catch (err) {
-        // ignore if already exists
+    const dbUrl = process.env.DATABASE_URL;
+    if (!dbUrl) {
+      if (process.env.NODE_ENV === 'production') {
+        throw new Error('FATAL: DATABASE_URL environment variable is required in production.');
       }
-    }
-    this.storageFile = path.join(dataDir, 'resumex_core_ultra_db.json');
-
-    if (process.env.DATABASE_URL) {
-      try {
-        this.pgPool = new Pool({
-          connectionString: process.env.DATABASE_URL,
-          max: 10,
-          connectionTimeoutMillis: 5000,
-        });
-        console.log('[DB] PostgreSQL pool configured with DATABASE_URL.');
-      } catch (err) {
-        console.error('[DB] Failed to initialize PostgreSQL pool:', err);
-      }
+      console.warn('[Database] WARNING: DATABASE_URL is not set. Database operations will require DATABASE_URL.');
     }
 
-    this.loadState();
-    if (this.users.size === 0) {
-      this.seedDemoData();
-      this.persistState();
-    }
-  }
-
-  private persistState() {
-    try {
-      const state: PersistedState = {
-        users: Object.fromEntries(this.users),
-        profiles: Object.fromEntries(this.profiles),
-        resumes: Object.fromEntries(this.resumes),
-        versions: Object.fromEntries(this.versions),
-        jobDescriptions: Object.fromEntries(this.jobDescriptions),
-        jobMatches: Object.fromEntries(this.jobMatches),
-        issues: Object.fromEntries(this.issues),
-        careerGaps: Object.fromEntries(this.careerGaps),
-        auditEvents: this.auditEvents.slice(-500), // Keep last 500 audit logs
-      };
-      fs.writeFileSync(this.storageFile, JSON.stringify(state, null, 2), 'utf-8');
-    } catch (err) {
-      console.error('[DB] Failed to persist state to disk:', err);
-    }
-  }
-
-  private loadState() {
-    try {
-      if (fs.existsSync(this.storageFile)) {
-        const raw = fs.readFileSync(this.storageFile, 'utf-8');
-        const state: PersistedState = JSON.parse(raw);
-        this.users = new Map(Object.entries(state.users || {}));
-        this.profiles = new Map(Object.entries(state.profiles || {}));
-        this.resumes = new Map(Object.entries(state.resumes || {}));
-        this.versions = new Map(Object.entries(state.versions || {}));
-        this.jobDescriptions = new Map(Object.entries(state.jobDescriptions || {}));
-        this.jobMatches = new Map(Object.entries(state.jobMatches || {}));
-        this.issues = new Map(Object.entries(state.issues || {}));
-        this.careerGaps = new Map(Object.entries(state.careerGaps || {}));
-        this.auditEvents = state.auditEvents || [];
-      }
-    } catch (err) {
-      console.error('[DB] Failed to load persisted state, starting fresh:', err);
-    }
-  }
-
-  // --- PASSWORD SECURITY (Argon2 / bcryptjs standard) ---
-  public async hashPassword(password: string): Promise<string> {
-    const salt = await bcrypt.genSalt(10);
-    return bcrypt.hash(password, salt);
-  }
-
-  public async verifyPassword(password: string, hash: string): Promise<boolean> {
-    return bcrypt.compare(password, hash);
-  }
-
-  // --- AUDIT LOGGING ---
-  public logAudit(userId: string, action: string, resourceType: string, resourceId: string, details?: Record<string, unknown>) {
-    this.auditEvents.push({
-      id: crypto.randomUUID(),
-      userId,
-      action,
-      resourceId,
-      resourceType,
-      details,
-      timestamp: new Date().toISOString(),
+    this.pgPool = new Pool({
+      connectionString: dbUrl,
+      ssl: { rejectUnauthorized: false },
+      max: 20,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 8000,
     });
-    this.persistState();
-  }
 
-  public getAuditEvents(userId: string): AuditEvent[] {
-    return this.auditEvents.filter((a) => a.userId === userId);
-  }
+    this.pgPool.on('error', (err) => {
+      console.error('[PostgreSQL] Unexpected error on idle client:', err);
+    });
 
-  // --- USER MANAGEMENT & OWNERSHIP ---
-  public async createUser(name: string, email: string, password: string): Promise<{ user: User; verificationToken: string }> {
-    const cleanEmail = email.toLowerCase().trim();
-    const existing = this.getUserByEmail(cleanEmail);
-    if (existing) {
-      throw new Error('An account with this email address already exists.');
-    }
-
-    // Real secure email verification token (single-use, hashed, expires in 24 hours)
-    const verificationToken = crypto.randomBytes(32).toString('hex');
-    const hashedToken = crypto.createHash('sha256').update(verificationToken).digest('hex');
-    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-
-    const passwordHash = await this.hashPassword(password);
-    const user: User = {
-      id: crypto.randomUUID(),
-      name,
-      email: cleanEmail,
-      passwordHash,
-      emailVerified: false, // Strict: unverified until token is confirmed
-      verificationToken: hashedToken,
-      verificationTokenExpiresAt: expiresAt,
-      isDemo: false,
-      createdAt: new Date().toISOString(),
+    // Graceful shutdown
+    const cleanup = async () => {
+      try {
+        await this.pgPool.end();
+        console.log('[PostgreSQL] Pool has successfully drained.');
+      } catch (err) {
+        console.error('[PostgreSQL] Error closing pool:', err);
+      }
     };
-    this.users.set(user.id, user);
+    process.once('SIGINT', cleanup);
+    process.once('SIGTERM', cleanup);
 
-    // Default career profile
-    const profile: UserProfile = {
-      id: crypto.randomUUID(),
-      userId: user.id,
-      title: 'Senior Software Engineer',
-      targetRole: 'Software Engineer',
-      yearsOfExperience: 3,
-      location: 'San Francisco, CA',
-    };
-    this.profiles.set(profile.id, profile);
-
-    this.logAudit(user.id, 'USER_SIGNUP', 'User', user.id, { email: cleanEmail });
-    this.persistState();
-    return { user, verificationToken };
+    // Trigger schema bootstrap
+    this.ensureInitialized().catch((err) => {
+      console.error('[Database] Bootstrap error:', err);
+    });
   }
 
-  public verifyEmailToken(rawToken: string): User {
-    const hashedToken = crypto.createHash('sha256').update(rawToken).digest('hex');
+  public getPool(): Pool {
+    return this.pgPool;
+  }
+
+  /**
+   * Automatically bootstrap schema & default seed data into PostgreSQL
+   */
+  public async ensureInitialized(): Promise<void> {
+    if (this.isInitialized) return;
+    if (this.initPromise) return this.initPromise;
+
+    this.initPromise = (async () => {
+      const client = await this.pgPool.connect();
+      try {
+        // 1. Run schema DDL if tables missing
+        const schemaPath = path.join(process.cwd(), 'server', 'db', 'schema.sql');
+        if (fs.existsSync(schemaPath)) {
+          const sql = fs.readFileSync(schemaPath, 'utf-8');
+          await client.query(sql);
+        }
+
+        // 2. Ensure column migrations and compatibility tables
+        await client.query('ALTER TABLE resumes ADD COLUMN IF NOT EXISTS data_json JSONB;');
+        await client.query('ALTER TABLE job_descriptions ADD COLUMN IF NOT EXISTS seniority_level VARCHAR(64) DEFAULT \'Mid\';');
+        await client.query('ALTER TABLE job_descriptions ADD COLUMN IF NOT EXISTS location VARCHAR(255);');
+        await client.query('ALTER TABLE job_descriptions ADD COLUMN IF NOT EXISTS education_required BOOLEAN DEFAULT TRUE;');
+        await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS is_demo BOOLEAN DEFAULT FALSE;');
+        await client.query('ALTER TABLE profiles ADD COLUMN IF NOT EXISTS bio TEXT;');
+
+        // Ensure audit_logs exists alongside audit_events
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS audit_logs (
+            id VARCHAR(64) PRIMARY KEY,
+            user_id VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
+            action VARCHAR(128) NOT NULL,
+            entity_type VARCHAR(64),
+            entity_id VARCHAR(64),
+            resource_type VARCHAR(64),
+            resource_id VARCHAR(64),
+            details_json JSONB,
+            ip_address VARCHAR(64),
+            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+          );
+        `);
+
+        // 3. Ensure demo account exists in PostgreSQL
+        await this.seedDemoUser(client);
+
+        this.isInitialized = true;
+        console.log('[PostgreSQL] Database persistence layer fully initialized.');
+      } finally {
+        client.release();
+      }
+    })();
+
+    return this.initPromise;
+  }
+
+  private async seedDemoUser(client: PoolClient): Promise<void> {
+    const demoEmail = 'alex.rivera.demo@resumex.ai';
+    // Check if demo user already exists, but continue to ensure child resources (jobs, matches, audit) are present
+    const demoUserId = 'demo-user-101';
+    const demoPasswordHash = await hashPassword('DemoPass2026!');
     const now = new Date().toISOString();
 
-    for (const user of this.users.values()) {
-      if (user.verificationToken === hashedToken) {
-        if (user.verificationTokenExpiresAt && user.verificationTokenExpiresAt < now) {
-          throw new Error('Email verification token has expired. Please request a new verification email.');
-        }
-        user.emailVerified = true;
-        user.verificationToken = undefined;
-        user.verificationTokenExpiresAt = undefined;
-        user.updatedAt = now;
-        this.users.set(user.id, user);
-        this.logAudit(user.id, 'EMAIL_VERIFIED', 'User', user.id);
-        this.persistState();
-        return user;
-      }
-    }
-    throw new Error('Invalid or already used verification token.');
-  }
+    // 1. Create demo user
+    await client.query(
+      `INSERT INTO users (id, name, email, password_hash, email_verified, is_demo, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, TRUE, TRUE, $5, $5)
+       ON CONFLICT (email) DO NOTHING`,
+      [demoUserId, 'Alex Rivera (Demo)', demoEmail, demoPasswordHash, now]
+    );
 
-  public createPasswordResetToken(email: string): { resetToken: string; expiresAt: string } {
-    const cleanEmail = email.toLowerCase().trim();
-    const user = this.getUserByEmail(cleanEmail);
-    if (!user) {
-      throw new Error('No user account found with this email address.');
-    }
+    // 2. Create demo profile
+    const demoProfileId = 'demo-profile-1';
+    await client.query(
+      `INSERT INTO profiles (id, user_id, title, target_role, years_of_experience, location, bio, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+       ON CONFLICT (id) DO NOTHING`,
+      [
+        demoProfileId,
+        demoUserId,
+        'Senior Full-Stack Engineer',
+        'Staff Software Engineer',
+        6,
+        'San Francisco, CA',
+        'Experienced engineer specializing in distributed systems and modern web applications.',
+        now,
+      ]
+    );
 
-    const resetToken = crypto.randomBytes(32).toString('hex');
-    const hashedToken = crypto.createHash('sha256').update(resetToken).digest('hex');
-    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // 1 hour
-
-    user.resetToken = hashedToken;
-    user.resetTokenExpiresAt = expiresAt;
-    user.updatedAt = new Date().toISOString();
-    this.users.set(user.id, user);
-    this.logAudit(user.id, 'PASSWORD_RESET_REQUESTED', 'User', user.id);
-    this.persistState();
-
-    return { resetToken, expiresAt };
-  }
-
-  public async resetPasswordWithToken(rawToken: string, newPassword: string): Promise<User> {
-    const hashedToken = crypto.createHash('sha256').update(rawToken).digest('hex');
-    const now = new Date().toISOString();
-
-    for (const user of this.users.values()) {
-      if (user.resetToken === hashedToken) {
-        if (user.resetTokenExpiresAt && user.resetTokenExpiresAt < now) {
-          throw new Error('Password reset token has expired. Please request a new link.');
-        }
-        user.passwordHash = await this.hashPassword(newPassword);
-        user.resetToken = undefined;
-        user.resetTokenExpiresAt = undefined;
-        user.updatedAt = now;
-        this.users.set(user.id, user);
-        this.logAudit(user.id, 'PASSWORD_RESET_COMPLETED', 'User', user.id);
-        this.persistState();
-        return user;
-      }
-    }
-    throw new Error('Invalid or expired password reset token.');
-  }
-
-  public async createOrLinkGoogleUser(payload: { email: string; name: string; googleId?: string }): Promise<User> {
-    const cleanEmail = payload.email.toLowerCase().trim();
-    let user = this.getUserByEmail(cleanEmail);
-
-    if (!user) {
-      const dummyPassword = crypto.randomBytes(24).toString('hex');
-      const passwordHash = await this.hashPassword(dummyPassword);
-      user = {
-        id: crypto.randomUUID(),
-        name: payload.name || cleanEmail.split('@')[0],
-        email: cleanEmail,
-        passwordHash,
-        emailVerified: true, // Google OAuth confirms email ownership
-        isDemo: false,
-        createdAt: new Date().toISOString(),
-      };
-      this.users.set(user.id, user);
-
-      const profile: UserProfile = {
-        id: crypto.randomUUID(),
-        userId: user.id,
-        title: 'Software Engineer',
-        targetRole: 'Software Engineer',
-        yearsOfExperience: 3,
-        location: 'San Francisco, CA',
-      };
-      this.profiles.set(profile.id, profile);
-      this.logAudit(user.id, 'GOOGLE_OAUTH_SIGNUP', 'User', user.id);
-    } else {
-      user.emailVerified = true;
-      this.logAudit(user.id, 'GOOGLE_OAUTH_LOGIN', 'User', user.id);
-    }
-
-    this.persistState();
-    return user;
-  }
-
-  public deleteUserAccount(userId: string) {
-    const user = this.users.get(userId);
-    if (!user) return;
-
-    // Cascade delete resumes & versions
-    for (const [resId, res] of this.resumes.entries()) {
-      if (res.userId === userId) {
-        this.resumes.delete(resId);
-        this.versions.delete(resId);
-        this.issues.delete(resId);
-      }
-    }
-
-    // Cascade delete job matches & descriptions
-    for (const [jdId, jd] of this.jobDescriptions.entries()) {
-      if (jd.userId === userId) {
-        this.jobDescriptions.delete(jdId);
-      }
-    }
-
-    // Cascade delete profiles
-    for (const [profId, prof] of this.profiles.entries()) {
-      if (prof.userId === userId) {
-        this.profiles.delete(profId);
-      }
-    }
-
-    this.users.delete(userId);
-    this.logAudit(userId, 'USER_DELETED', 'User', userId);
-    this.persistState();
-  }
-
-  public getUserById(id: string): User | undefined {
-    return this.users.get(id);
-  }
-
-  public getUserByEmail(email: string): User | undefined {
-    const clean = email.toLowerCase().trim();
-    for (const user of this.users.values()) {
-      if (user.email === clean) return user;
-    }
-    return undefined;
-  }
-
-  public getProfileByUserId(userId: string): UserProfile | undefined {
-    for (const profile of this.profiles.values()) {
-      if (profile.userId === userId) return profile;
-    }
-    return undefined;
-  }
-
-  public getProfilesByUser(userId: string): UserProfile[] {
-    const prof = this.getProfileByUserId(userId);
-    return prof ? [prof] : [];
-  }
-
-  public updateProfile(userId: string, updates: Partial<UserProfile>): UserProfile {
-    let profile = this.getProfileByUserId(userId);
-    if (!profile) {
-      profile = {
-        id: crypto.randomUUID(),
-        userId,
-        title: updates.title || 'Software Engineer',
-        targetRole: updates.targetRole || 'Software Engineer',
-        yearsOfExperience: updates.yearsOfExperience || 3,
-        location: updates.location || 'San Francisco, CA',
-      };
-      this.profiles.set(profile.id, profile);
-    } else {
-      Object.assign(profile, updates);
-      this.profiles.set(profile.id, profile);
-    }
-    this.persistState();
-    return profile;
-  }
-
-  // --- RESUME MANAGEMENT ---
-  public getResumesByUser(userId: string): StoredResume[] {
-    const list: StoredResume[] = [];
-    for (const r of this.resumes.values()) {
-      if (r.userId === userId) {
-        if (!r.score) {
-          r.score = {
-            overall: r.atsScore || 85,
-            contentQuality: 85,
-            atsCompatibility: r.atsScore || 85,
-            skillsScore: 85,
-            experienceScore: 85,
-            projectsScore: 85,
-            achievementsScore: 85,
-            grammarScore: 90,
-            formattingScore: 90,
-            readabilityScore: 88,
-            deductions: [],
-          };
-        }
-        list.push(r);
-      }
-    }
-    return list.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
-  }
-
-  public getResumeById(id: string, userId?: string): StoredResume | undefined {
-    const res = this.resumes.get(id);
-    if (!res) return undefined;
-    if (userId && res.userId !== userId) {
-      return undefined; // Security: User ownership isolation
-    }
-    if (!res.score) {
-      res.score = {
-        overall: res.atsScore || 85,
-        contentQuality: 85,
-        atsCompatibility: res.atsScore || 85,
-        skillsScore: 85,
-        experienceScore: 85,
-        projectsScore: 85,
-        achievementsScore: 85,
-        grammarScore: 90,
-        formattingScore: 90,
-        readabilityScore: 88,
-        deductions: [],
-      };
-    }
-    return res;
-  }
-
-  public getResume(userId: string, resumeId: string): StoredResume {
-    const res = this.getResumeById(resumeId, userId);
-    if (!res) {
-      throw new Error(`Resume ${resumeId} not found or unauthorized.`);
-    }
-    return res;
-  }
-
-  public updateResumeScores(userId: string, resumeId: string, score: ResumeScoreBreakdown, atsScore?: number): StoredResume {
-    const res = this.getResume(userId, resumeId);
-    res.score = score;
-    if (atsScore !== undefined) res.atsScore = atsScore;
-    res.updatedAt = new Date().toISOString();
-    this.resumes.set(resumeId, res);
-    this.persistState();
-    return res;
-  }
-
-  public updateResumeData(userId: string, resumeId: string, data: ResumeData, title?: string, templateId?: string): StoredResume {
-    return this.updateResume(resumeId, data, title, templateId, userId);
-  }
-
-  public saveResume(
-    resumeOrUserId: StoredResume | string,
-    data?: ResumeData,
-    title?: string,
-    templateId?: string,
-    rawText?: string,
-    fileType?: string,
-    fileName?: string
-  ): StoredResume {
-    if (typeof resumeOrUserId === 'object') {
-      const resume = resumeOrUserId;
-      if (!resume.score) {
-        resume.score = {
-          overall: resume.atsScore || 85,
-          contentQuality: 85,
-          atsCompatibility: resume.atsScore || 85,
-          skillsScore: 85,
-          experienceScore: 85,
-          projectsScore: 85,
-          achievementsScore: 85,
-          grammarScore: 90,
-          formattingScore: 90,
-          readabilityScore: 88,
-          deductions: [],
-        };
-      }
-      this.resumes.set(resume.id, resume);
-      this.persistState();
-      return resume;
-    }
-
-    const userId = resumeOrUserId;
-    const id = crypto.randomUUID();
-    const versionId = crypto.randomUUID();
-    const now = new Date().toISOString();
-    const initialScore: ResumeScoreBreakdown = {
-      overall: 85,
-      contentQuality: 85,
-      atsCompatibility: 85,
-      skillsScore: 85,
-      experienceScore: 85,
-      projectsScore: 85,
-      achievementsScore: 85,
-      grammarScore: 90,
-      formattingScore: 90,
-      readabilityScore: 88,
-      deductions: [],
-    };
-
-    const newResume: StoredResume = {
-      id,
-      userId,
-      profileId: this.getProfileByUserId(userId)?.id || 'default-prof',
-      title: title || 'Untitled Resume',
-      rawText,
-      fileType,
-      fileName,
-      data: data!,
-      score: initialScore,
-      atsScore: 85,
-      templateId: templateId || 'ats-classic',
-      currentVersionId: versionId,
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    this.resumes.set(id, newResume);
-    const v1: ResumeVersion = {
-      id: versionId,
-      resumeId: id,
-      versionNumber: 1,
-      versionName: 'v1.0 - Initial Upload',
-      createdAt: now,
-      resumeData: data!,
-      score: initialScore,
-      atsScore: 85,
-      changeSummary: 'Initial structured resume model extracted.',
-    };
-    this.saveVersion(v1, userId);
-    this.persistState();
-    return newResume;
-  }
-
-  public updateResume(
-    id: string,
-    data: ResumeData,
-    title?: string,
-    templateId?: string,
-    userId?: string
-  ): StoredResume {
-    const existing = this.getResumeById(id, userId);
-    if (!existing) {
-      throw new Error('Resume not found or unauthorized access.');
-    }
-    existing.data = data;
-    if (title) existing.title = title;
-    if (templateId) existing.templateId = templateId;
-    existing.updatedAt = new Date().toISOString();
-    this.resumes.set(id, existing);
-    this.persistState();
-    return existing;
-  }
-
-  public deleteResume(id: string, userId?: string) {
-    const existing = this.getResumeById(id, userId);
-    if (!existing) {
-      throw new Error('Resume not found or unauthorized access.');
-    }
-    this.resumes.delete(id);
-    this.versions.delete(id);
-    this.issues.delete(id);
-    this.persistState();
-  }
-
-  // --- VERSIONING ---
-  public getVersions(resumeId: string, userId?: string): ResumeVersion[] {
-    const res = this.getResumeById(resumeId, userId);
-    if (!res) return [];
-    return this.versions.get(resumeId) || [];
-  }
-
-  public saveVersion(version: ResumeVersion, userId?: string) {
-    const res = this.getResumeById(version.resumeId, userId);
-    if (!res) throw new Error('Resume not found or unauthorized access.');
-    const list = this.versions.get(version.resumeId) || [];
-    list.push(version);
-    this.versions.set(version.resumeId, list);
-    this.persistState();
-  }
-
-  public createVersion(
-    userId: string,
-    resumeId: string,
-    versionName: string,
-    data: ResumeData,
-    score?: ResumeScoreBreakdown,
-    atsScore?: number,
-    changeSummary?: string,
-    targetJobScore?: number,
-    targetJobId?: string
-  ): ResumeVersion {
-    const cloned = JSON.parse(JSON.stringify(data));
-    const version: ResumeVersion = {
-      id: `ver-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-      resumeId,
-      versionName,
-      versionNumber: (this.getVersions(resumeId, userId).length || 0) + 1,
-      resumeData: cloned,
-      data: cloned,
-      score: score || {
-        overall: 80,
-        contentQuality: 80,
-        atsCompatibility: atsScore ?? 80,
-        skillsScore: 80,
-        experienceScore: 80,
-        projectsScore: 80,
-        achievementsScore: 80,
-        grammarScore: 80,
-        formattingScore: 80,
-        readabilityScore: 80,
-        deductions: [],
-      },
-      atsScore: atsScore ?? 80,
-      changeSummary: changeSummary || 'Version revision.',
-      targetJobScore,
-      targetJobId,
-      createdAt: new Date().toISOString(),
-    };
-    this.saveVersion(version, userId);
-    return version;
-  }
-
-  // --- ISSUES & SUGGESTIONS ---
-  public getIssues(resumeId: string, userId?: string): AnalysisIssue[] {
-    const res = this.getResumeById(resumeId, userId);
-    if (!res) return [];
-    return this.issues.get(resumeId) || [];
-  }
-
-  public setIssues(arg1: string, arg2: string | AnalysisIssue[], arg3?: AnalysisIssue[] | string) {
-    let resumeId: string;
-    let issues: AnalysisIssue[];
-    let userId: string | undefined;
-
-    if (Array.isArray(arg2)) {
-      resumeId = arg1;
-      issues = arg2;
-      userId = typeof arg3 === 'string' ? arg3 : undefined;
-    } else {
-      userId = arg1;
-      resumeId = arg2;
-      issues = (arg3 as AnalysisIssue[]) || [];
-    }
-
-    const res = this.getResumeById(resumeId, userId);
-    if (!res) throw new Error('Resume not found or unauthorized access.');
-    this.issues.set(resumeId, issues);
-    this.persistState();
-  }
-
-  public updateIssueStatus(
-    arg1: string,
-    arg2: string,
-    arg3: string,
-    arg4?: string
-  ): AnalysisIssue {
-    let resumeId: string;
-    let issueId: string;
-    let status: 'pending' | 'accepted' | 'rejected';
-    let userId: string | undefined;
-
-    if (arg4) {
-      userId = arg1;
-      resumeId = arg2;
-      issueId = arg3;
-      status = (arg4 === 'accepted' || arg4 === 'rejected' ? arg4 : 'pending') as 'pending' | 'accepted' | 'rejected';
-    } else {
-      resumeId = arg1;
-      issueId = arg2;
-      status = (arg3 === 'accepted' || arg3 === 'rejected' ? arg3 : 'pending') as 'pending' | 'accepted' | 'rejected';
-    }
-
-    const res = this.getResumeById(resumeId, userId);
-    if (!res) throw new Error('Resume not found or unauthorized access.');
-    const issues = this.issues.get(resumeId) || [];
-    const issue = issues.find((i) => i.id === issueId);
-    if (!issue) throw new Error('Issue not found');
-    issue.status = status;
-    this.issues.set(resumeId, issues);
-    this.persistState();
-    return issue;
-  }
-
-  // --- JOB MATCHING & CAREER GAPS ---
-  public getJobDescription(id: string, userId?: string): JobDescriptionModel | undefined {
-    const jd = this.jobDescriptions.get(id);
-    if (!jd) return undefined;
-    if (userId && jd.userId && jd.userId !== userId) return undefined;
-    return jd;
-  }
-
-  public getJobDescriptions(userId?: string): JobDescriptionModel[] {
-    const all = Array.from(this.jobDescriptions.values());
-    if (!userId) return all;
-    return all.filter((j) => !j.userId || j.userId === userId);
-  }
-
-  public saveJobDescription(
-    jobOrUserId: string | Partial<JobDescriptionModel>,
-    maybeJob?: Partial<JobDescriptionModel>
-  ): JobDescriptionModel {
-    let raw: Partial<JobDescriptionModel>;
-    let userId: string = 'default';
-    if (typeof jobOrUserId === 'string') {
-      userId = jobOrUserId;
-      raw = maybeJob || {};
-    } else {
-      raw = jobOrUserId || {};
-      userId = raw.userId || 'default';
-    }
-    const job: JobDescriptionModel = {
-      id: raw.id || `jd-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-      userId,
-      title: raw.title || 'Untitled Job',
-      company: raw.company || 'Unknown Company',
-      rawText: raw.rawText || '',
-      requiredSkills: raw.requiredSkills || [],
-      preferredSkills: raw.preferredSkills || [],
-      responsibilities: raw.responsibilities || [],
-      experienceYearsRequired: raw.experienceYearsRequired || 3,
-      seniorityLevel: raw.seniorityLevel || 'Mid',
-      educationRequired: raw.educationRequired,
-      domainKeywords: raw.domainKeywords || [],
-      createdAt: raw.createdAt || new Date().toISOString(),
-    };
-    this.jobDescriptions.set(job.id, job);
-    this.persistState();
-    return job;
-  }
-
-  public getJobMatch(resumeId: string, jobId: string, userId?: string): JobMatchResult | undefined {
-    const res = this.getResumeById(resumeId, userId);
-    if (!res) return undefined;
-    return this.jobMatches.get(`${resumeId}_${jobId}`);
-  }
-
-  public saveJobMatch(
-    arg1: string | JobMatchResult,
-    resumeId?: string,
-    jobId?: string,
-    matchResult?: JobMatchResult
-  ): JobMatchResult {
-    let match: JobMatchResult;
-    if (typeof arg1 === 'string') {
-      match = matchResult!;
-      match.resumeId = resumeId;
-      match.jobId = jobId!;
-    } else {
-      match = arg1;
-    }
-    const rId = match.resumeId || resumeId || '';
-    const jId = match.jobId || jobId || '';
-    this.jobMatches.set(`${rId}_${jId}`, match);
-    this.persistState();
-    return match;
-  }
-
-  public getCareerGap(userId: string, targetRole: string): CareerGapAnalysis | undefined {
-    return this.careerGaps.get(`${userId}_${targetRole}`);
-  }
-
-  public saveCareerGap(
-    arg1: string | CareerGapAnalysis,
-    role?: string,
-    gapAnalysis?: CareerGapAnalysis
-  ): CareerGapAnalysis {
-    let gap: CareerGapAnalysis;
-    let uId: string;
-    let targetRole: string;
-    if (typeof arg1 === 'string') {
-      uId = arg1;
-      targetRole = role!;
-      gap = gapAnalysis!;
-      gap.userId = uId;
-      gap.targetRole = targetRole;
-    } else {
-      gap = arg1;
-      uId = gap.userId || 'default';
-      targetRole = gap.targetRole;
-    }
-    this.careerGaps.set(`${uId}_${targetRole}`, gap);
-    this.persistState();
-    return gap;
-  }
-
-  // --- SEED DEMO DATA (Isolated Demo Account) ---
-  public seedDemoData() {
-    const demoUser: User = {
-      id: 'demo-user-101',
-      name: 'Alex Rivera',
-      email: 'alex.rivera.demo@resumex.ai',
-      passwordHash: '$2a$10$w81fA9k6c6Xw7Y9Oq3hM6eY/Q0cQ0fG1vR3W4Z6X9eY8c1u4aG5k2', // demo hash
-      emailVerified: true,
-      isDemo: true,
-      createdAt: new Date().toISOString(),
-    };
-    this.users.set(demoUser.id, demoUser);
-
-    const demoProfile: UserProfile = {
-      id: 'demo-profile-1',
-      userId: demoUser.id,
-      title: 'Staff / Senior Full-Stack Engineer',
-      targetRole: 'Staff Software Engineer',
-      yearsOfExperience: 6,
-      location: 'San Francisco, CA',
-    };
-    this.profiles.set(demoProfile.id, demoProfile);
-
-    const sampleResumeData: ResumeData = {
+    // 3. Create demo resume
+    const demoResumeId = 'demo-resume-1';
+    const demoVersionId = 'demo-version-1';
+    const demoResumeData: ResumeData = {
       personal_info: {
         name: 'Alex Rivera',
         email: 'alex.rivera.dev@gmail.com',
@@ -822,7 +179,6 @@ export class DatabaseEngine {
         location: 'San Francisco, CA',
         linkedin: 'https://linkedin.com/in/alexrivera-cloud',
         github: 'https://github.com/alexrivera-tech',
-        portfolio: 'https://alexrivera.dev',
       },
       summary:
         'Performance-driven Senior Full-Stack Engineer with 6+ years of experience architecting distributed microservices, scalable React/TypeScript web apps, and resilient event-driven systems on AWS. Champion of clean code, automated CI/CD pipelines, and high-throughput real-time data flows.',
@@ -852,64 +208,53 @@ export class DatabaseEngine {
           location: 'San Francisco, CA',
           startDate: '2022-03',
           endDate: 'Present',
+          current: true,
           bullets: [
-            'Architected and led the development of a real-time analytics streaming dashboard serving 4.2M active monthly users with sub-80ms p99 latency.',
-            'Refactored legacy monolith into 14 containerized microservices orchestrated via Kubernetes and AWS ECS, reducing infrastructure spend by 32%.',
-            'Implemented optimistic UI state synchronization using WebSockets and React 18, slashing perceived loading states by 45%.',
-            'Mentored 6 junior and mid-level engineers in TypeScript patterns, system design, and test-driven development.',
+            'Architected distributed event-driven microservices processing 45,000 requests/sec with Node.js, Go, and Kafka, slashing API p99 latency by 38%.',
+            'Led frontend modernization migrating legacy monolith to React 18 and Next.js, elevating Lighthouse performance scores from 54 to 96.',
+            'Engineered real-time telemetry dashboard using WebSockets and Redis Pub/Sub, cutting customer incident response time by 42%.',
+            'Mentored 6 junior engineers and spearheaded automated testing standards, driving unit and end-to-end code coverage to 91%.',
           ],
-          technologies: ['React', 'TypeScript', 'Node.js', 'AWS ECS', 'Kubernetes', 'Redis', 'PostgreSQL'],
+          technologies: ['TypeScript', 'React', 'Go', 'Node.js', 'Kafka', 'Redis', 'AWS'],
         },
         {
           id: 'exp-2',
-          company: 'Apex Data Labs',
+          company: 'Apex Data Systems',
           role: 'Full-Stack Software Engineer',
           location: 'San Jose, CA',
           startDate: '2019-06',
           endDate: '2022-02',
+          current: false,
           bullets: [
-            'Engineered customer-facing reporting modules and RESTful endpoints in Node.js and PostgreSQL handling 250,000+ daily requests.',
-            'Collaborated with product designers to build a shared design system of 45+ WCAG-accessible React components across 3 product lines.',
-            'Reduced CI/CD build and verification runtime from 28 minutes to 9 minutes by parallelizing GitHub Actions test matrices.',
-            'Integrated Stripe recurring billing engine and webhook event verification with 99.98% financial transaction accuracy.',
+            'Designed and built multi-tenant SaaS analytics platform utilizing React, Express, PostgreSQL, and AWS ECS serving 120,000 active users.',
+            'Optimized complex relational SQL queries and indexed database tables, reducing median dashboard query latency from 3.2s to 180ms.',
+            'Configured robust CI/CD deployment pipelines using GitHub Actions and Docker, reducing release cycle duration from 4 days to 35 minutes.',
           ],
-          technologies: ['Node.js', 'Express', 'React', 'PostgreSQL', 'Stripe API', 'Docker'],
+          technologies: ['React', 'TypeScript', 'Node.js', 'PostgreSQL', 'Docker', 'AWS'],
+        },
+      ],
+      projects: [
+        {
+          id: 'proj-1',
+          title: 'CloudMesh — Distributed Observability Engine',
+          role: 'Creator & Lead Developer',
+          technologies: ['Go', 'TypeScript', 'React', 'eBPF', 'Docker'],
+          link: 'https://github.com/alexrivera-tech/cloudmesh',
+          bullets: [
+            'Developed open-source zero-instrumentation network topology monitor adopted by 1,400+ GitHub stars and 200+ active enterprise deployments.',
+            'Constructed low-overhead kernel event interceptor delivering under 1.2% CPU utilization overhead under peak network saturation.',
+          ],
         },
       ],
       education: [
         {
           id: 'edu-1',
           institution: 'University of California, Berkeley',
-          degree: 'Bachelor of Science in Computer Science',
-          fieldOfStudy: 'Computer Science & Distributed Systems',
-          startDate: '2015-08',
-          endDate: '2019-05',
+          degree: 'Bachelor of Science',
+          field: 'Computer Science',
+          startDate: '2015',
+          endDate: '2019',
           gpa: '3.82',
-          honors: ['Dean’s Honors List', 'Tau Beta Pi Engineering Honor Society'],
-        },
-      ],
-      projects: [
-        {
-          id: 'proj-1',
-          title: 'PulseTelemetry — High-Frequency Distributed Monitoring',
-          role: 'Creator & Lead Architect',
-          link: 'https://github.com/alexrivera-tech/pulse-telemetry',
-          technologies: ['Go', 'TypeScript', 'React', 'TimescaleDB', 'Docker'],
-          bullets: [
-            'Developed an open-source telemetry aggregation tool processing 50,000 metric events/sec with zero packet loss.',
-            'Built an intuitive SVG timeline visualizer with zoom/pan and threshold alerting, earning 1,400+ stars on GitHub.',
-          ],
-        },
-        {
-          id: 'proj-2',
-          title: 'CloudMesh — Serverless Infrastructure Provisioner',
-          role: 'Full-Stack Developer',
-          link: 'https://github.com/alexrivera-tech/cloudmesh',
-          technologies: ['Python', 'FastAPI', 'React', 'AWS SDK', 'Terraform'],
-          bullets: [
-            'Constructed a multi-tenant cloud sandbox orchestrator that provisions preview environments in under 90 seconds.',
-            'Automated teardown and IAM role isolation saving over $18,000 in idle cloud compute costs.',
-          ],
         },
       ],
       certifications: [
@@ -917,125 +262,1155 @@ export class DatabaseEngine {
           id: 'cert-1',
           name: 'AWS Certified Solutions Architect – Associate',
           issuer: 'Amazon Web Services',
-          date: '2023-04',
-          credentialId: 'AWS-SAA-884920',
-        },
-        {
-          id: 'cert-2',
-          name: 'Certified Kubernetes Application Developer (CKAD)',
-          issuer: 'The Linux Foundation',
-          date: '2022-11',
-          credentialId: 'CKAD-294811',
+          date: '2023',
+          issueDate: '2023',
         },
       ],
       achievements: [
         {
           id: 'ach-1',
-          title: 'HyperScale Hackathon 1st Place Winner',
-          description: 'Designed an autonomous incident triage bot resolving 24% of tier-1 server alerts automatically.',
-          date: '2023-10',
+          title: 'Engineering Excellence Award',
+          description: 'Recognized for highest infrastructure stability achievement and zero-downtime database migration at HyperScale Networks.',
+          date: '2023',
+          metric: 'Zero Downtime',
         },
       ],
     };
-
-    const resumeId = 'demo-resume-1';
-    const versionId = 'demo-ver-1';
-    const now = new Date().toISOString();
 
     const initialScore: ResumeScoreBreakdown = {
-      overall: 92,
-      contentQuality: 94,
-      atsCompatibility: 95,
+      overall: 88,
+      contentQuality: 89,
+      atsCompatibility: 91,
       skillsScore: 92,
-      experienceScore: 93,
-      projectsScore: 90,
-      achievementsScore: 88,
-      grammarScore: 96,
-      formattingScore: 94,
-      readabilityScore: 91,
-      deductions: [
-        {
-          category: 'Achievements',
-          reason: 'Could highlight business revenue impact alongside technical latency figures.',
-          points: 3,
-          recommendation: 'Specify dollar ROI or user conversion gains if available.',
-        },
-      ],
+      experienceScore: 89,
+      projectsScore: 86,
+      achievementsScore: 85,
+      grammarScore: 94,
+      formattingScore: 92,
+      readabilityScore: 90,
+      deductions: [],
     };
 
-    const storedResume: StoredResume = {
-      id: resumeId,
-      userId: demoUser.id,
-      profileId: demoProfile.id,
-      title: 'Alex Rivera — Staff / Senior Full-Stack Resume',
-      fileType: 'application/pdf',
-      fileName: 'Alex_Rivera_Senior_FullStack_2026.pdf',
-      data: sampleResumeData,
-      score: initialScore,
-      atsScore: 95,
-      templateId: 'ats-classic',
-      currentVersionId: versionId,
+    // Insert demo resume
+    await client.query(
+      `INSERT INTO resumes (id, user_id, profile_id, title, raw_text, file_type, file_name, template_id, current_version_id, ats_score, score_json, data_json, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13)
+       ON CONFLICT (id) DO NOTHING`,
+      [
+        demoResumeId,
+        demoUserId,
+        demoProfileId,
+        'Staff Full-Stack Engineer — Production Resume',
+        'Alex Rivera - Senior Full-Stack Engineer...',
+        'application/json',
+        'Alex_Rivera_Resume.pdf',
+        'ats-classic',
+        demoVersionId,
+        91,
+        JSON.stringify(initialScore),
+        JSON.stringify(demoResumeData),
+        now,
+      ]
+    );
+
+    // Insert demo version
+    await client.query(
+      `INSERT INTO resume_versions (id, resume_id, user_id, version_name, resume_data_json, score_json, ats_score, change_summary, is_active, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE, $9)
+       ON CONFLICT (id) DO NOTHING`,
+      [
+        demoVersionId,
+        demoResumeId,
+        demoUserId,
+        'v1.0 — Initial Verified Master',
+        JSON.stringify(demoResumeData),
+        JSON.stringify(initialScore),
+        91,
+        'Initial verified master resume.',
+        now,
+      ]
+    );
+
+    // Normalize relational tables for demo resume
+    await this.syncNormalizedTables(client, demoResumeId, demoResumeData);
+
+    // 4. Insert sample target job description for demo user
+    const demoJobId = 'demo-job-1';
+    await client.query(
+      `INSERT INTO job_descriptions (id, user_id, title, company, location, raw_text, required_skills_json, preferred_skills_json, domain_keywords_json, responsibilities_json, experience_years_required, seniority_level, education_required, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, TRUE, $13)
+       ON CONFLICT (id) DO NOTHING`,
+      [
+        demoJobId,
+        demoUserId,
+        'Staff Cloud & Distributed Systems Engineer',
+        'Stripe',
+        'San Francisco, CA (Hybrid)',
+        'Stripe is seeking a Staff Cloud & Distributed Systems Engineer to lead the architecture of high-throughput payment settlement microservices processing millions of financial events daily. Requirements: 5+ years of experience with TypeScript, Go, PostgreSQL, Distributed Systems, Kubernetes, AWS, and Kafka.',
+        JSON.stringify(['TypeScript', 'Go', 'PostgreSQL', 'Distributed Systems', 'Kubernetes', 'AWS', 'Kafka']),
+        JSON.stringify(['Redis', 'Docker', 'GraphQL', 'CI/CD']),
+        JSON.stringify(['microservices', 'settlement', 'distributed', 'high-throughput', 'slas', 'latency']),
+        JSON.stringify([
+          'Architect high-throughput payment settlement microservices processing millions of financial events.',
+          'Scale distributed relational and event stores to handle 99.999% uptime SLAs.',
+          'Lead technical design reviews and mentor senior engineering personnel across teams.',
+        ]),
+        5,
+        'Senior',
+        now,
+      ]
+    );
+
+    // 5. Seed audit trail entry (both audit_events and audit_logs)
+    await client.query(
+      `INSERT INTO audit_events (id, user_id, action, resource_type, resource_id, details_json, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       ON CONFLICT (id) DO NOTHING`,
+      [
+        'audit-init-1',
+        demoUserId,
+        'USER_INITIALIZED',
+        'user',
+        demoUserId,
+        JSON.stringify({ note: 'Demo environment provisioned with verified resume and target role.' }),
+        now,
+      ]
+    );
+
+    await client.query(
+      `INSERT INTO audit_logs (id, user_id, action, entity_type, entity_id, resource_type, resource_id, details_json, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       ON CONFLICT (id) DO NOTHING`,
+      [
+        'audit-init-1',
+        demoUserId,
+        'USER_INITIALIZED',
+        'user',
+        demoUserId,
+        'user',
+        demoUserId,
+        JSON.stringify({ note: 'Demo environment provisioned with verified resume and target role.' }),
+        now,
+      ]
+    );
+  }
+
+  /**
+   * Decomposes structured ResumeData into normalized PostgreSQL tables:
+   * resume_sections, skills, experiences, projects, education, certifications, achievements
+   */
+  private async syncNormalizedTables(client: PoolClient, resumeId: string, data: ResumeData): Promise<void> {
+    // 1. Clear old child rows for this resume
+    await client.query('DELETE FROM resume_sections WHERE resume_id = $1', [resumeId]);
+    await client.query('DELETE FROM skills WHERE resume_id = $1', [resumeId]);
+    await client.query('DELETE FROM experiences WHERE resume_id = $1', [resumeId]);
+    await client.query('DELETE FROM projects WHERE resume_id = $1', [resumeId]);
+    await client.query('DELETE FROM education WHERE resume_id = $1', [resumeId]);
+    await client.query('DELETE FROM certifications WHERE resume_id = $1', [resumeId]);
+    await client.query('DELETE FROM achievements WHERE resume_id = $1', [resumeId]);
+
+    // 2. Sections
+    const sections = [
+      { type: 'personal_info', title: 'Contact Information', order: 0, content: data.personal_info },
+      { type: 'summary', title: 'Professional Summary', order: 1, content: { summary: data.summary } },
+      { type: 'skills', title: 'Technical Skills', order: 2, content: data.skills },
+      { type: 'experience', title: 'Work Experience', order: 3, content: data.experience },
+      { type: 'projects', title: 'Key Projects', order: 4, content: data.projects },
+      { type: 'education', title: 'Education', order: 5, content: data.education },
+      { type: 'certifications', title: 'Certifications', order: 6, content: data.certifications },
+      { type: 'achievements', title: 'Achievements', order: 7, content: data.achievements },
+    ];
+
+    for (const sec of sections) {
+      await client.query(
+        `INSERT INTO resume_sections (id, resume_id, section_type, display_title, order_index, is_visible, content_json)
+         VALUES ($1, $2, $3, $4, $5, TRUE, $6)`,
+        [crypto.randomUUID(), resumeId, sec.type, sec.title, sec.order, JSON.stringify(sec.content)]
+      );
+    }
+
+    // 3. Skills
+    for (const group of data.skills || []) {
+      for (const item of group.items || []) {
+        await client.query(
+          `INSERT INTO skills (id, resume_id, category, name, proficiency, confidence)
+           VALUES ($1, $2, $3, $4, 'Proficient', 1.0)`,
+          [crypto.randomUUID(), resumeId, group.category || 'General', item]
+        );
+      }
+    }
+
+    // 4. Experiences
+    for (const exp of data.experience || []) {
+      await client.query(
+        `INSERT INTO experiences (id, resume_id, company, role, location, start_date, end_date, is_current, bullets_json, technologies_json)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [
+          crypto.randomUUID(),
+          resumeId,
+          exp.company || 'Unknown',
+          exp.role || 'Contributor',
+          exp.location || '',
+          exp.startDate || '',
+          exp.endDate || '',
+          Boolean(exp.current),
+          JSON.stringify(exp.bullets || []),
+          JSON.stringify(exp.technologies || []),
+        ]
+      );
+    }
+
+    // 5. Projects
+    for (const proj of data.projects || []) {
+      await client.query(
+        `INSERT INTO projects (id, resume_id, title, role, link, bullets_json, technologies_json)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          crypto.randomUUID(),
+          resumeId,
+          proj.title || 'Project',
+          proj.role || '',
+          proj.link || '',
+          JSON.stringify(proj.bullets || []),
+          JSON.stringify(proj.technologies || []),
+        ]
+      );
+    }
+
+    // 6. Education
+    for (const edu of data.education || []) {
+      await client.query(
+        `INSERT INTO education (id, resume_id, institution, degree, field_of_study, start_date, end_date, gpa)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [
+          crypto.randomUUID(),
+          resumeId,
+          edu.institution || '',
+          edu.degree || '',
+          edu.field || '',
+          edu.startDate || '',
+          edu.endDate || '',
+          edu.gpa || '',
+        ]
+      );
+    }
+
+    // 7. Certifications
+    for (const cert of data.certifications || []) {
+      await client.query(
+        `INSERT INTO certifications (id, resume_id, name, issuer, issue_date, link)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [crypto.randomUUID(), resumeId, cert.name || '', cert.issuer || '', cert.issueDate || '', cert.link || '']
+      );
+    }
+
+    // 8. Achievements
+    for (const ach of data.achievements || []) {
+      await client.query(
+        `INSERT INTO achievements (id, resume_id, title, description, date, metric)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [crypto.randomUUID(), resumeId, ach.title || '', ach.description || '', ach.date || '', ach.metric || '']
+      );
+    }
+  }
+
+  // --- PASSWORD & CRYPTO UTILITIES ---
+  public async hashPassword(password: string): Promise<string> {
+    return hashPassword(password);
+  }
+
+  public async verifyPassword(password: string, hash: string): Promise<boolean> {
+    return verifyPassword(password, hash);
+  }
+
+  // --- AUDIT LOGGING ---
+  public async logAudit(
+    userId: string | null,
+    action: string,
+    resourceType: string,
+    resourceId?: string,
+    details?: Record<string, unknown>,
+    ipAddress?: string
+  ): Promise<void> {
+    await this.ensureInitialized();
+    const eventId = crypto.randomUUID();
+    const detailsJson = details ? JSON.stringify(details) : null;
+    try {
+      await this.pgPool.query(
+        `INSERT INTO audit_events (id, user_id, action, resource_type, resource_id, details_json, ip_address, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
+        [eventId, userId, action, resourceType, resourceId || null, detailsJson, ipAddress || null]
+      );
+      await this.pgPool.query(
+        `INSERT INTO audit_logs (id, user_id, action, entity_type, entity_id, resource_type, resource_id, details_json, ip_address, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())`,
+        [eventId, userId, action, resourceType, resourceId || null, resourceType, resourceId || null, detailsJson, ipAddress || null]
+      );
+    } catch (err) {
+      console.error('[Audit] Failed to record audit event:', err);
+    }
+  }
+
+  public async getAuditEvents(userId: string): Promise<AuditEvent[]> {
+    await this.ensureInitialized();
+    const res = await this.pgPool.query(
+      `SELECT id, user_id as "userId", action, resource_type as "resourceType", resource_id as "resourceId", details_json as details, created_at as timestamp
+       FROM audit_events WHERE user_id = $1 ORDER BY created_at DESC LIMIT 200`,
+      [userId]
+    );
+    return res.rows;
+  }
+
+  // --- USER MANAGEMENT & SECURITY ---
+  public async createUser(
+    name: string,
+    email: string,
+    password: string
+  ): Promise<{ user: User; verificationToken: string }> {
+    await this.ensureInitialized();
+    const cleanEmail = email.toLowerCase().trim();
+
+    const existing = await this.getUserByEmail(cleanEmail);
+    if (existing) {
+      throw new Error('An account with this email address already exists.');
+    }
+
+    // Cryptographically secure token (single-use, stored as SHA-256 hash, expires in 24 hours)
+    const rawVerificationToken = crypto.randomBytes(32).toString('hex');
+    const hashedToken = crypto.createHash('sha256').update(rawVerificationToken).digest('hex');
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    const passwordHash = await this.hashPassword(password);
+    const userId = crypto.randomUUID();
+    const now = new Date().toISOString();
+
+    const client = await this.pgPool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // 1. Insert user
+      const userRes = await client.query(
+        `INSERT INTO users (id, name, email, password_hash, email_verified, verification_token, verification_token_expires_at, is_demo, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, FALSE, $5, $6, FALSE, $7, $7)
+         RETURNING id, name, email, password_hash as "passwordHash", email_verified as "emailVerified", is_demo as "isDemo", created_at as "createdAt"`,
+        [userId, name, cleanEmail, passwordHash, hashedToken, expiresAt, now]
+      );
+
+      // 2. Insert neutral profile defaults (Requirement 7: Neutral defaults, never fabricated)
+      const profileId = crypto.randomUUID();
+      await client.query(
+        `INSERT INTO profiles (id, user_id, title, target_role, years_of_experience, location, created_at, updated_at)
+         VALUES ($1, $2, 'Professional Profile', '', 0, '', $3, $3)`,
+        [profileId, userId, now]
+      );
+
+      await client.query('COMMIT');
+
+      const user = userRes.rows[0];
+      await this.logAudit(user.id, 'USER_SIGNUP', 'User', user.id, { email: cleanEmail });
+
+      return { user, verificationToken: rawVerificationToken };
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  public async verifyEmailToken(rawToken: string): Promise<User> {
+    await this.ensureInitialized();
+    const hashedToken = crypto.createHash('sha256').update(rawToken).digest('hex');
+    const now = new Date().toISOString();
+
+    const res = await this.pgPool.query(
+      `SELECT id, name, email, password_hash as "passwordHash", email_verified as "emailVerified", verification_token_expires_at as "expiresAt", is_demo as "isDemo"
+       FROM users WHERE verification_token = $1`,
+      [hashedToken]
+    );
+
+    if (res.rows.length === 0) {
+      throw new Error('Invalid or already used verification token.');
+    }
+
+    const userRow = res.rows[0];
+    if (userRow.expiresAt && new Date(userRow.expiresAt).getTime() < Date.now()) {
+      throw new Error('Verification token has expired. Please request a new verification email.');
+    }
+
+    await this.pgPool.query(
+      `UPDATE users
+       SET email_verified = TRUE, verification_token = NULL, verification_token_expires_at = NULL, updated_at = NOW()
+       WHERE id = $1`,
+      [userRow.id]
+    );
+
+    await this.logAudit(userRow.id, 'EMAIL_VERIFIED', 'User', userRow.id);
+
+    return {
+      id: userRow.id,
+      name: userRow.name,
+      email: userRow.email,
+      passwordHash: userRow.passwordHash,
+      emailVerified: true,
+      isDemo: userRow.isDemo,
       createdAt: now,
-      updatedAt: now,
     };
-    this.resumes.set(resumeId, storedResume);
+  }
 
-    const initialVersion: ResumeVersion = {
+  public async createPasswordResetToken(email: string): Promise<{ resetToken: string; expiresAt: string } | null> {
+    await this.ensureInitialized();
+    const cleanEmail = email.toLowerCase().trim();
+    const user = await this.getUserByEmail(cleanEmail);
+    if (!user) {
+      // Do not reveal whether user exists
+      return null;
+    }
+
+    const rawResetToken = crypto.randomBytes(32).toString('hex');
+    const hashedToken = crypto.createHash('sha256').update(rawResetToken).digest('hex');
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // 1 hour
+
+    await this.pgPool.query(
+      `UPDATE users
+       SET reset_token = $1, reset_token_expires_at = $2, updated_at = NOW()
+       WHERE id = $3`,
+      [hashedToken, expiresAt, user.id]
+    );
+
+    await this.logAudit(user.id, 'PASSWORD_RESET_REQUESTED', 'User', user.id);
+
+    return { resetToken: rawResetToken, expiresAt };
+  }
+
+  public async resetPasswordWithToken(rawToken: string, newPassword: string): Promise<User> {
+    await this.ensureInitialized();
+    const hashedToken = crypto.createHash('sha256').update(rawToken).digest('hex');
+
+    const res = await this.pgPool.query(
+      `SELECT id, name, email, reset_token_expires_at as "expiresAt", is_demo as "isDemo"
+       FROM users WHERE reset_token = $1`,
+      [hashedToken]
+    );
+
+    if (res.rows.length === 0) {
+      throw new Error('Invalid or expired password reset token.');
+    }
+
+    const userRow = res.rows[0];
+    if (userRow.expiresAt && new Date(userRow.expiresAt).getTime() < Date.now()) {
+      throw new Error('Password reset token has expired. Please request a new reset link.');
+    }
+
+    const newHash = await this.hashPassword(newPassword);
+
+    await this.pgPool.query(
+      `UPDATE users
+       SET password_hash = $1, reset_token = NULL, reset_token_expires_at = NULL, updated_at = NOW()
+       WHERE id = $2`,
+      [newHash, userRow.id]
+    );
+
+    await this.logAudit(userRow.id, 'PASSWORD_RESET_COMPLETED', 'User', userRow.id);
+
+    return {
+      id: userRow.id,
+      name: userRow.name,
+      email: userRow.email,
+      passwordHash: newHash,
+      emailVerified: true,
+      isDemo: userRow.isDemo,
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  public async createOrLinkGoogleUser(payload: { email: string; name: string }): Promise<User> {
+    await this.ensureInitialized();
+    const cleanEmail = payload.email.toLowerCase().trim();
+    let user = await this.getUserByEmail(cleanEmail);
+
+    if (!user) {
+      const dummyPassword = crypto.randomBytes(32).toString('hex');
+      const passwordHash = await this.hashPassword(dummyPassword);
+      const userId = crypto.randomUUID();
+      const now = new Date().toISOString();
+
+      const client = await this.pgPool.connect();
+      try {
+        await client.query('BEGIN');
+        const res = await client.query(
+          `INSERT INTO users (id, name, email, password_hash, email_verified, is_demo, created_at, updated_at)
+           VALUES ($1, $2, $3, $4, TRUE, FALSE, $5, $5)
+           RETURNING id, name, email, password_hash as "passwordHash", email_verified as "emailVerified", is_demo as "isDemo", created_at as "createdAt"`,
+          [userId, payload.name || cleanEmail.split('@')[0], cleanEmail, passwordHash, now]
+        );
+
+        await client.query(
+          `INSERT INTO profiles (id, user_id, title, target_role, years_of_experience, location, created_at, updated_at)
+           VALUES ($1, $2, 'Professional Profile', '', 0, '', $3, $3)`,
+          [crypto.randomUUID(), userId, now]
+        );
+
+        await client.query('COMMIT');
+        user = res.rows[0];
+        await this.logAudit(user!.id, 'GOOGLE_OAUTH_SIGNUP', 'User', user!.id);
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
+      }
+    } else {
+      await this.pgPool.query('UPDATE users SET email_verified = TRUE, updated_at = NOW() WHERE id = $1', [user.id]);
+      user.emailVerified = true;
+      await this.logAudit(user.id, 'GOOGLE_OAUTH_LOGIN', 'User', user.id);
+    }
+
+    return user!;
+  }
+
+  public async deleteUserAccount(userId: string): Promise<void> {
+    await this.ensureInitialized();
+    await this.pgPool.query('DELETE FROM users WHERE id = $1', [userId]);
+    await this.logAudit(userId, 'USER_DELETED', 'User', userId);
+  }
+
+  public async getUserById(id: string): Promise<User | undefined> {
+    await this.ensureInitialized();
+    const res = await this.pgPool.query(
+      `SELECT id, name, email, password_hash as "passwordHash", email_verified as "emailVerified", is_demo as "isDemo", created_at as "createdAt"
+       FROM users WHERE id = $1`,
+      [id]
+    );
+    return res.rows[0];
+  }
+
+  public async getUserByEmail(email: string): Promise<User | undefined> {
+    await this.ensureInitialized();
+    const clean = email.toLowerCase().trim();
+    const res = await this.pgPool.query(
+      `SELECT id, name, email, password_hash as "passwordHash", email_verified as "emailVerified", is_demo as "isDemo", created_at as "createdAt"
+       FROM users WHERE LOWER(email) = $1`,
+      [clean]
+    );
+    return res.rows[0];
+  }
+
+  // --- PROFILES ---
+  public async getProfileByUserId(userId: string): Promise<UserProfile | undefined> {
+    await this.ensureInitialized();
+    const res = await this.pgPool.query(
+      `SELECT id, user_id as "userId", title, target_role as "targetRole", years_of_experience as "yearsOfExperience", location, bio
+       FROM profiles WHERE user_id = $1 LIMIT 1`,
+      [userId]
+    );
+    return res.rows[0];
+  }
+
+  public async getProfilesByUser(userId: string): Promise<UserProfile[]> {
+    const p = await this.getProfileByUserId(userId);
+    return p ? [p] : [];
+  }
+
+  public async updateProfile(userId: string, updates: Partial<UserProfile>): Promise<UserProfile> {
+    await this.ensureInitialized();
+    const existing = await this.getProfileByUserId(userId);
+    const now = new Date().toISOString();
+
+    if (!existing) {
+      const id = crypto.randomUUID();
+      const res = await this.pgPool.query(
+        `INSERT INTO profiles (id, user_id, title, target_role, years_of_experience, location, bio, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+         RETURNING id, user_id as "userId", title, target_role as "targetRole", years_of_experience as "yearsOfExperience", location, bio`,
+        [
+          id,
+          userId,
+          updates.title || 'Professional Profile',
+          updates.targetRole || '',
+          updates.yearsOfExperience || 0,
+          updates.location || '',
+          updates.bio || null,
+          now,
+        ]
+      );
+      return res.rows[0];
+    }
+
+    const title = updates.title !== undefined ? updates.title : existing.title;
+    const targetRole = updates.targetRole !== undefined ? updates.targetRole : existing.targetRole;
+    const yearsOfExp = updates.yearsOfExperience !== undefined ? updates.yearsOfExperience : existing.yearsOfExperience;
+    const location = updates.location !== undefined ? updates.location : existing.location;
+    const bio = updates.bio !== undefined ? updates.bio : existing.bio;
+
+    const res = await this.pgPool.query(
+      `UPDATE profiles
+       SET title = $1, target_role = $2, years_of_experience = $3, location = $4, bio = $5, updated_at = NOW()
+       WHERE user_id = $6
+       RETURNING id, user_id as "userId", title, target_role as "targetRole", years_of_experience as "yearsOfExperience", location, bio`,
+      [title, targetRole, yearsOfExp, location, bio, userId]
+    );
+
+    return res.rows[0];
+  }
+
+  // --- RESUME OPERATIONS ---
+  public async getResumesByUser(userId: string): Promise<StoredResume[]> {
+    await this.ensureInitialized();
+    const res = await this.pgPool.query(
+      `SELECT id, user_id as "userId", profile_id as "profileId", title, raw_text as "rawText",
+              file_type as "fileType", file_name as "fileName", template_id as "templateId",
+              current_version_id as "currentVersionId", ats_score as "atsScore",
+              score_json as score, data_json as data, created_at as "createdAt", updated_at as "updatedAt"
+       FROM resumes
+       WHERE user_id = $1
+       ORDER BY updated_at DESC`,
+      [userId]
+    );
+
+    return res.rows.map((row) => this.hydrateStoredResume(row));
+  }
+
+  public async getResumeById(id: string, userId?: string): Promise<StoredResume | undefined> {
+    await this.ensureInitialized();
+    let query = `SELECT id, user_id as "userId", profile_id as "profileId", title, raw_text as "rawText",
+                        file_type as "fileType", file_name as "fileName", template_id as "templateId",
+                        current_version_id as "currentVersionId", ats_score as "atsScore",
+                        score_json as score, data_json as data, created_at as "createdAt", updated_at as "updatedAt"
+                 FROM resumes WHERE id = $1`;
+    const params: (string | undefined)[] = [id];
+
+    if (userId) {
+      query += ` AND user_id = $2`;
+      params.push(userId);
+    }
+
+    const res = await this.pgPool.query(query, params);
+    if (res.rows.length === 0) return undefined;
+    return this.hydrateStoredResume(res.rows[0]);
+  }
+
+  public async getResume(userId: string, resumeId: string): Promise<StoredResume> {
+    const res = await this.getResumeById(resumeId, userId);
+    if (!res) {
+      throw new Error(`Resume ${resumeId} not found or access unauthorized.`);
+    }
+    return res;
+  }
+
+  private hydrateStoredResume(row: any): StoredResume {
+    const data = row.data || {
+      personal_info: { name: '', email: '', phone: '', location: '' },
+      summary: '',
+      skills: [],
+      experience: [],
+      education: [],
+      projects: [],
+      certifications: [],
+      achievements: [],
+    };
+
+    const score = row.score || {
+      overall: row.atsScore || 85,
+      contentQuality: 85,
+      atsCompatibility: row.atsScore || 85,
+      skillsScore: 85,
+      experienceScore: 85,
+      projectsScore: 85,
+      achievementsScore: 85,
+      grammarScore: 90,
+      formattingScore: 90,
+      readabilityScore: 88,
+      deductions: [],
+    };
+
+    return {
+      id: row.id,
+      userId: row.userId,
+      profileId: row.profileId || '',
+      title: row.title || 'Untitled Resume',
+      rawText: row.rawText,
+      fileType: row.fileType,
+      fileName: row.fileName,
+      data,
+      score,
+      atsScore: row.atsScore || 85,
+      templateId: row.templateId || 'ats-classic',
+      currentVersionId: row.currentVersionId || '',
+      createdAt: row.createdAt instanceof Date ? row.createdAt.toISOString() : row.createdAt,
+      updatedAt: row.updatedAt instanceof Date ? row.updatedAt.toISOString() : row.updatedAt,
+    };
+  }
+
+  public async saveResume(
+    userId: string,
+    data: ResumeData,
+    title?: string,
+    templateId?: string,
+    rawText?: string,
+    fileType?: string,
+    fileName?: string
+  ): Promise<StoredResume> {
+    await this.ensureInitialized();
+    const id = crypto.randomUUID();
+    const versionId = crypto.randomUUID();
+    const now = new Date().toISOString();
+
+    const profile = await this.getProfileByUserId(userId);
+    const profileId = profile?.id || null;
+
+    const initialScore: ResumeScoreBreakdown = {
+      overall: 85,
+      contentQuality: 85,
+      atsCompatibility: 85,
+      skillsScore: 85,
+      experienceScore: 85,
+      projectsScore: 85,
+      achievementsScore: 85,
+      grammarScore: 90,
+      formattingScore: 90,
+      readabilityScore: 88,
+      deductions: [],
+    };
+
+    const client = await this.pgPool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // 1. Insert into resumes
+      await client.query(
+        `INSERT INTO resumes (id, user_id, profile_id, title, raw_text, file_type, file_name, template_id, current_version_id, ats_score, score_json, data_json, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 85, $10, $11, $12, $12)`,
+        [
+          id,
+          userId,
+          profileId,
+          title || 'Untitled Resume',
+          rawText || null,
+          fileType || 'application/pdf',
+          fileName || 'resume.pdf',
+          templateId || 'ats-classic',
+          versionId,
+          JSON.stringify(initialScore),
+          JSON.stringify(data),
+          now,
+        ]
+      );
+
+      // 2. Insert initial version
+      await client.query(
+        `INSERT INTO resume_versions (id, resume_id, user_id, version_name, resume_data_json, score_json, ats_score, change_summary, is_active, created_at)
+         VALUES ($1, $2, $3, 'v1.0 — Initial Structured Resume', $4, $5, 85, 'Initial structured extraction and baseline setup.', TRUE, $6)`,
+        [versionId, id, userId, JSON.stringify(data), JSON.stringify(initialScore), now]
+      );
+
+      // 3. Populate normalized relational tables
+      await this.syncNormalizedTables(client, id, data);
+
+      await client.query('COMMIT');
+
+      const saved = await this.getResume(userId, id);
+      await this.logAudit(userId, 'RESUME_CREATED', 'Resume', id, { title: saved.title });
+      return saved;
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  public async updateResumeData(
+    userId: string,
+    resumeId: string,
+    data: ResumeData,
+    title?: string,
+    templateId?: string
+  ): Promise<StoredResume> {
+    await this.ensureInitialized();
+    const existing = await this.getResume(userId, resumeId);
+
+    const client = await this.pgPool.connect();
+    try {
+      await client.query('BEGIN');
+
+      let query = `UPDATE resumes SET data_json = $1, updated_at = NOW()`;
+      const params: any[] = [JSON.stringify(data)];
+      let idx = 2;
+
+      if (title) {
+        query += `, title = $${idx++}`;
+        params.push(title);
+      }
+      if (templateId) {
+        query += `, template_id = $${idx++}`;
+        params.push(templateId);
+      }
+
+      query += ` WHERE id = $${idx++} AND user_id = $${idx++}`;
+      params.push(resumeId, userId);
+
+      await client.query(query, params);
+
+      // Re-sync normalized tables
+      await this.syncNormalizedTables(client, resumeId, data);
+
+      await client.query('COMMIT');
+
+      await this.logAudit(userId, 'RESUME_UPDATED', 'Resume', resumeId);
+      return await this.getResume(userId, resumeId);
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  public async updateResumeScores(
+    userId: string,
+    resumeId: string,
+    score: ResumeScoreBreakdown,
+    atsScore?: number
+  ): Promise<StoredResume> {
+    await this.ensureInitialized();
+    await this.pgPool.query(
+      `UPDATE resumes
+       SET score_json = $1, ats_score = COALESCE($2, ats_score), updated_at = NOW()
+       WHERE id = $3 AND user_id = $4`,
+      [JSON.stringify(score), atsScore !== undefined ? atsScore : null, resumeId, userId]
+    );
+    return await this.getResume(userId, resumeId);
+  }
+
+  public async deleteResume(userId: string, resumeId: string): Promise<void> {
+    await this.ensureInitialized();
+    // Verify ownership
+    await this.getResume(userId, resumeId);
+    await this.pgPool.query('DELETE FROM resumes WHERE id = $1 AND user_id = $2', [resumeId, userId]);
+    await this.logAudit(userId, 'RESUME_DELETED', 'Resume', resumeId);
+  }
+
+  // --- VERSIONING ---
+  public async getVersions(userId: string, resumeId: string): Promise<ResumeVersion[]> {
+    await this.ensureInitialized();
+    await this.getResume(userId, resumeId); // Verify ownership
+
+    const res = await this.pgPool.query(
+      `SELECT id, resume_id as "resumeId", version_name as "versionName",
+              resume_data_json as "resumeData", resume_data_json as data,
+              score_json as score, ats_score as "atsScore", change_summary as "changeSummary",
+              created_at as "createdAt"
+       FROM resume_versions
+       WHERE resume_id = $1 AND user_id = $2
+       ORDER BY created_at DESC`,
+      [resumeId, userId]
+    );
+
+    return res.rows.map((row, index, arr) => ({
+      id: row.id,
+      resumeId: row.resumeId,
+      versionNumber: arr.length - index,
+      versionName: row.versionName,
+      createdAt: row.createdAt instanceof Date ? row.createdAt.toISOString() : row.createdAt,
+      resumeData: row.resumeData,
+      data: row.resumeData,
+      score: row.score,
+      atsScore: row.atsScore,
+      changeSummary: row.changeSummary,
+    }));
+  }
+
+  public async createVersion(
+    userId: string,
+    resumeId: string,
+    versionName: string,
+    data: ResumeData,
+    score?: ResumeScoreBreakdown,
+    atsScore?: number,
+    changeSummary?: string,
+    targetJobScore?: number,
+    targetJobId?: string
+  ): Promise<ResumeVersion> {
+    await this.ensureInitialized();
+    await this.getResume(userId, resumeId);
+
+    const versionId = crypto.randomUUID();
+    const now = new Date().toISOString();
+
+    await this.pgPool.query(
+      `INSERT INTO resume_versions (id, resume_id, user_id, version_name, resume_data_json, score_json, ats_score, change_summary, is_active, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, FALSE, $9)`,
+      [
+        versionId,
+        resumeId,
+        userId,
+        versionName,
+        JSON.stringify(data),
+        score ? JSON.stringify(score) : null,
+        atsScore ?? 85,
+        changeSummary || 'Controlled version checkpoint.',
+        now,
+      ]
+    );
+
+    await this.pgPool.query('UPDATE resumes SET current_version_id = $1, updated_at = NOW() WHERE id = $2', [
+      versionId,
+      resumeId,
+    ]);
+
+    return {
       id: versionId,
       resumeId,
       versionNumber: 1,
-      versionName: 'v1.0 - Production Master',
+      versionName,
       createdAt: now,
-      resumeData: sampleResumeData,
-      score: initialScore,
-      atsScore: 95,
-      changeSummary: 'Verified senior profile with comprehensive metrics and standard ATS taxonomy.',
+      resumeData: data,
+      data,
+      score: score || {
+        overall: 85,
+        contentQuality: 85,
+        atsCompatibility: atsScore ?? 85,
+        skillsScore: 85,
+        experienceScore: 85,
+        projectsScore: 85,
+        achievementsScore: 85,
+        grammarScore: 90,
+        formattingScore: 90,
+        readabilityScore: 88,
+        deductions: [],
+      },
+      atsScore: atsScore ?? 85,
+      changeSummary: changeSummary || 'Version snapshot created.',
+      targetJobScore,
+      targetJobId,
     };
-    this.versions.set(resumeId, [initialVersion]);
+  }
 
-    const sampleJd: JobDescriptionModel = {
-      id: 'demo-job-1',
-      userId: demoUser.id,
-      title: 'Staff / Senior Full-Stack Engineer',
-      company: 'Stripe / Core Infrastructure',
-      rawText: `Role: Staff / Senior Full-Stack Engineer
-Location: Remote / San Francisco, CA
-Experience: 5+ years of production software engineering experience.
+  // --- ISSUES & SUGGESTIONS ---
+  public async getIssues(userId: string, resumeId: string): Promise<AnalysisIssue[]> {
+    await this.ensureInitialized();
+    await this.getResume(userId, resumeId);
 
-We are seeking an experienced Senior Full-Stack Engineer to build scalable web applications, real-time financial dashboards, and mission-critical developer tools. 
+    const res = await this.pgPool.query(
+      `SELECT id, section, issue_type as "type", severity, evidence, reason, suggestion, confidence, status
+       FROM analysis_issues
+       WHERE resume_id = $1
+       ORDER BY created_at ASC`,
+      [resumeId]
+    );
 
-Responsibilities:
-- Architect and maintain mission-critical customer-facing web applications using React, TypeScript, and modern state architectures.
-- Design resilient, high-throughput microservices and RESTful/GraphQL APIs using Node.js, Go, or Python.
-- Partner with infrastructure teams to deploy and manage containerized services using Docker, Kubernetes, and AWS.
-- Ensure 99.99% system reliability, performance optimization, sub-100ms response times, and robust telemetry.
-- Mentor junior engineers, establish testing standards, and drive engineering excellence.
+    return res.rows;
+  }
 
-Requirements:
-- Strong proficiency in TypeScript, React, Node.js, and SQL (PostgreSQL).
-- Deep experience with Cloud services (AWS or GCP), Docker, and Kubernetes.
-- Solid understanding of distributed systems, caching (Redis), and event-driven architectures.
-- Experience with CI/CD automation and automated testing (Jest, Cypress).
-- Bachelor's degree in Computer Science or equivalent practical experience.
+  public async setIssues(userId: string, resumeId: string, issues: AnalysisIssue[]): Promise<void> {
+    await this.ensureInitialized();
+    await this.getResume(userId, resumeId);
 
-Nice-to-Have:
-- Experience with Go, Terraform, and high-frequency data pipelines.
-- Active open-source contributions or technical leadership experience.`,
-      requiredSkills: ['TypeScript', 'React', 'Node.js', 'PostgreSQL', 'AWS', 'Docker', 'Kubernetes', 'Redis', 'CI/CD'],
-      preferredSkills: ['Go', 'Terraform', 'GraphQL', 'TimescaleDB', 'System Design'],
-      responsibilities: [
-        'Architect and maintain mission-critical web applications with React and TypeScript',
-        'Design resilient microservices and APIs with Node.js',
-        'Deploy and manage containerized services with Kubernetes and AWS',
-        'Ensure 99.99% system reliability and telemetry monitoring',
-      ],
-      experienceYearsRequired: 5,
-      seniorityLevel: 'Senior',
-      educationRequired: 'Bachelor’s degree in Computer Science or equivalent',
-      domainKeywords: ['Distributed Systems', 'Microservices', 'High-Throughput', 'Event-Driven', 'Cloud Infrastructure'],
-      createdAt: now,
+    const client = await this.pgPool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('DELETE FROM analysis_issues WHERE resume_id = $1', [resumeId]);
+
+      for (const iss of issues) {
+        await client.query(
+          `INSERT INTO analysis_issues (id, resume_id, section, issue_type, severity, evidence, reason, suggestion, confidence, status, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())`,
+          [
+            iss.id || crypto.randomUUID(),
+            resumeId,
+            iss.section || 'experience',
+            iss.type || 'bullet_weak_impact',
+            iss.severity || 'medium',
+            iss.evidence || '',
+            iss.reason || '',
+            iss.suggestion || '',
+            iss.confidence || 0.95,
+            iss.status || 'pending',
+          ]
+        );
+      }
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  public async updateIssueStatus(
+    userId: string,
+    resumeId: string,
+    issueId: string,
+    status: 'pending' | 'accepted' | 'rejected'
+  ): Promise<AnalysisIssue> {
+    await this.ensureInitialized();
+    await this.getResume(userId, resumeId);
+
+    const res = await this.pgPool.query(
+      `UPDATE analysis_issues
+       SET status = $1
+       WHERE id = $2 AND resume_id = $3
+       RETURNING id, section, issue_type as "type", severity, evidence, reason, suggestion, confidence, status`,
+      [status, issueId, resumeId]
+    );
+
+    if (res.rows.length === 0) {
+      throw new Error(`Issue ${issueId} not found.`);
+    }
+
+    return res.rows[0];
+  }
+
+  // --- JOB DESCRIPTIONS & MATCHES ---
+  public async getJobDescriptions(userId: string): Promise<JobDescriptionModel[]> {
+    await this.ensureInitialized();
+    const res = await this.pgPool.query(
+      `SELECT id, user_id as "userId", title, company, location, raw_text as "rawText",
+              required_skills_json as "requiredSkills", preferred_skills_json as "preferredSkills",
+              responsibilities_json as responsibilities, experience_years_required as "experienceYearsRequired",
+              seniority_level as "seniorityLevel",
+              domain_keywords_json as "domainKeywords", created_at as "createdAt"
+       FROM job_descriptions
+       WHERE user_id = $1
+       ORDER BY created_at DESC`,
+      [userId]
+    );
+
+    return res.rows.map((r) => ({
+      id: r.id,
+      userId: r.userId,
+      title: r.title,
+      company: r.company || 'Unknown',
+      location: r.location || '',
+      rawText: r.rawText,
+      requiredSkills: r.requiredSkills || [],
+      preferredSkills: r.preferredSkills || [],
+      responsibilities: r.responsibilities || [],
+      experienceYearsRequired: r.experienceYearsRequired || 3,
+      seniorityLevel: (r.seniorityLevel as any) || 'Mid',
+      domainKeywords: r.domainKeywords || [],
+      createdAt: r.createdAt instanceof Date ? r.createdAt.toISOString() : r.createdAt,
+    }));
+  }
+
+  public async getJobDescription(userId: string, jobId: string): Promise<JobDescriptionModel> {
+    await this.ensureInitialized();
+    const res = await this.pgPool.query(
+      `SELECT id, user_id as "userId", title, company, location, raw_text as "rawText",
+              required_skills_json as "requiredSkills", preferred_skills_json as "preferredSkills",
+              responsibilities_json as responsibilities, experience_years_required as "experienceYearsRequired",
+              seniority_level as "seniorityLevel",
+              domain_keywords_json as "domainKeywords", created_at as "createdAt"
+       FROM job_descriptions
+       WHERE id = $1 AND user_id = $2`,
+      [jobId, userId]
+    );
+
+    if (res.rows.length === 0) {
+      throw new Error(`Job description ${jobId} not found or unauthorized.`);
+    }
+
+    const r = res.rows[0];
+    return {
+      id: r.id,
+      userId: r.userId,
+      title: r.title,
+      company: r.company || 'Unknown',
+      location: r.location || '',
+      rawText: r.rawText,
+      requiredSkills: r.requiredSkills || [],
+      preferredSkills: r.preferredSkills || [],
+      responsibilities: r.responsibilities || [],
+      experienceYearsRequired: r.experienceYearsRequired || 3,
+      seniorityLevel: (r.seniorityLevel as any) || 'Mid',
+      domainKeywords: r.domainKeywords || [],
+      createdAt: r.createdAt instanceof Date ? r.createdAt.toISOString() : r.createdAt,
     };
-    this.jobDescriptions.set(sampleJd.id, sampleJd);
+  }
+
+  public async saveJobDescription(userId: string, job: Partial<JobDescriptionModel>): Promise<JobDescriptionModel> {
+    await this.ensureInitialized();
+    const id = job.id || crypto.randomUUID();
+    const now = new Date().toISOString();
+
+    await this.pgPool.query(
+      `INSERT INTO job_descriptions (id, user_id, title, company, location, raw_text, required_skills_json, preferred_skills_json, domain_keywords_json, responsibilities_json, experience_years_required, seniority_level, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       ON CONFLICT (id) DO UPDATE
+       SET title = EXCLUDED.title, company = EXCLUDED.company, location = EXCLUDED.location, raw_text = EXCLUDED.raw_text,
+           required_skills_json = EXCLUDED.required_skills_json, preferred_skills_json = EXCLUDED.preferred_skills_json,
+           domain_keywords_json = EXCLUDED.domain_keywords_json, responsibilities_json = EXCLUDED.responsibilities_json,
+           seniority_level = EXCLUDED.seniority_level`,
+      [
+        id,
+        userId,
+        job.title || 'Target Job Description',
+        job.company || 'Company',
+        job.location || '',
+        job.rawText || '',
+        JSON.stringify(job.requiredSkills || []),
+        JSON.stringify(job.preferredSkills || []),
+        JSON.stringify(job.domainKeywords || []),
+        JSON.stringify(job.responsibilities || []),
+        job.experienceYearsRequired || 3,
+        job.seniorityLevel || 'Mid',
+        now,
+      ]
+    );
+
+    return await this.getJobDescription(userId, id);
+  }
+
+  public async saveJobMatch(userId: string, resumeId: string, jobId: string, match: JobMatchResult): Promise<void> {
+    await this.ensureInitialized();
+    await this.getResume(userId, resumeId);
+    await this.getJobDescription(userId, jobId);
+
+    const matchId = crypto.randomUUID();
+    await this.pgPool.query(
+      `INSERT INTO job_matches (id, resume_id, job_id, user_id, overall_match, skill_match, semantic_match, keyword_match, experience_match, education_match, responsibility_match, matched_skills_json, missing_skills_json, recommendations_json, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
+       ON CONFLICT (id) DO NOTHING`,
+      [
+        matchId,
+        resumeId,
+        jobId,
+        userId,
+        match.overallMatch,
+        match.skillMatch,
+        match.semanticMatch,
+        match.keywordMatch,
+        match.experienceMatch,
+        match.educationMatch,
+        match.responsibilityMatch,
+        JSON.stringify(match.matchedSkills || []),
+        JSON.stringify(match.missingSkills || []),
+        JSON.stringify(match.recommendations || []),
+      ]
+    );
+  }
+
+  // --- CAREER GAPS ---
+  public async saveCareerGap(userId: string, targetRole: string, gap: CareerGapAnalysis): Promise<void> {
+    await this.ensureInitialized();
+    const id = crypto.randomUUID();
+    await this.pgPool.query(
+      `INSERT INTO career_gaps (id, user_id, target_role, analysis_json, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, NOW(), NOW())`,
+      [id, userId, targetRole, JSON.stringify(gap)]
+    );
+  }
+
+  public async getCareerGap(userId: string, targetRole: string): Promise<CareerGapAnalysis | undefined> {
+    await this.ensureInitialized();
+    const res = await this.pgPool.query(
+      `SELECT analysis_json FROM career_gaps
+       WHERE user_id = $1 AND target_role = $2
+       ORDER BY updated_at DESC LIMIT 1`,
+      [userId, targetRole]
+    );
+    return res.rows[0]?.analysis_json;
   }
 }
 

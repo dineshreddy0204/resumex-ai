@@ -1,5 +1,7 @@
+import crypto from 'crypto';
 import express from 'express';
-import type { Request, Response } from 'express';
+import type { Request, Response, NextFunction } from 'express';
+import multer from 'multer';
 import type { ResumeData } from './types';
 import { db } from './db';
 import { generateToken, requireAuth, type AuthenticatedRequest } from './auth';
@@ -16,65 +18,131 @@ import { templateEngine } from './services/templateEngine';
 import { exportEngine } from './services/exportEngine';
 import { nlpEvaluation } from './services/nlpEvaluation';
 import { resumeTruthEngine } from './services/resumeTruthEngine';
+import { emailService } from './services/emailService';
 import { isGeminiAvailable } from './gemini';
 
 export const apiRouter = express.Router();
 apiRouter.use(express.json({ limit: '15mb' }));
 
+// Multer configured with memory storage and strict 15MB limit
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 15 * 1024 * 1024 },
+});
+
+// Helper for structured errors
+function sendStructuredError(res: Response, status: number, code: string, message: string) {
+  return res.status(status).json({
+    error: {
+      code,
+      message,
+      requestId: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+    },
+  });
+}
+
+// Simple in-memory rate-limiter for auth endpoints
+const authRateLimitMap = new Map<string, { count: number; resetAt: number }>();
+function authRateLimiter(req: Request, res: Response, next: NextFunction) {
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  const now = Date.now();
+  const entry = authRateLimitMap.get(ip) || { count: 0, resetAt: now + 60000 };
+
+  if (now > entry.resetAt) {
+    entry.count = 1;
+    entry.resetAt = now + 60000;
+  } else {
+    entry.count++;
+  }
+  authRateLimitMap.set(ip, entry);
+
+  if (entry.count > 30) {
+    return sendStructuredError(res, 429, 'RATE_LIMIT_EXCEEDED', 'Too many requests. Please wait a minute and try again.');
+  }
+  next();
+}
+
 // --- 1. HEALTH & OBSERVABILITY ---
-apiRouter.get('/health', (_req: Request, res: Response) => {
+apiRouter.get('/health', async (_req: Request, res: Response) => {
+  let dbStatus = 'disconnected';
+  try {
+    const check = await db.getPool().query('SELECT 1');
+    if (check.rows.length > 0) dbStatus = 'connected';
+  } catch (err) {
+    console.error('[Health] DB ping failure:', err);
+  }
+
+  const aiStatus = isGeminiAvailable() ? 'available' : 'offline';
+  const overallStatus = dbStatus === 'connected' ? 'healthy' : 'degraded';
+
   res.json({
-    status: 'healthy',
-    product: 'ResumeX AI — Core Ultra',
-    version: '1.0.0-production',
+    status: overallStatus,
+    database: dbStatus,
+    ai: aiStatus,
+    version: 'Core Ultra 9.9',
     geminiEnabled: isGeminiAvailable(),
+    uptime: Math.floor(process.uptime()),
     timestamp: new Date().toISOString(),
-    uptimeSeconds: Math.floor(process.uptime()),
   });
 });
 
 // --- 2. AUTHENTICATION & SECURITY ---
-apiRouter.post('/auth/signup', async (req: Request, res: Response) => {
+
+// Email signup
+apiRouter.post('/auth/signup', authRateLimiter, async (req: Request, res: Response) => {
   try {
     const { name, email, password } = req.body;
     if (!name || !email || !password) {
-      return res.status(400).json({ error: 'Name, email, and password are required.' });
+      return sendStructuredError(res, 400, 'MISSING_FIELDS', 'Name, email, and password are required.');
     }
     if (password.length < 8) {
-      return res.status(400).json({ error: 'Password must be at least 8 characters long.' });
+      return sendStructuredError(res, 400, 'WEAK_PASSWORD', 'Password must be at least 8 characters long.');
     }
 
     const { user, verificationToken } = await db.createUser(name, email, password);
-    const profiles = db.getProfilesByUser(user.id);
+    const host = req.get('host') || 'localhost:3000';
+    const protocol = req.protocol || 'http';
+    const verifyUrl = `${protocol}://${host}/verify-email?token=${verificationToken}`;
 
-    res.status(201).json({
-      message: 'Account created successfully. Please verify your email address to activate your account.',
-      verificationRequired: true,
-      verificationToken, // Provided directly for immediate sandbox verification UX
+    await emailService.sendVerificationEmail(user.email, user.name, verificationToken, verifyUrl);
+
+    // Production security constraint: Never return raw verificationToken in normal API response
+    const responsePayload: Record<string, any> = {
+      message: 'Account created successfully. Please check your email inbox to verify your account.',
+      requiresVerification: true,
       user: {
         id: user.id,
         name: user.name,
         email: user.email,
-        emailVerified: user.emailVerified,
+        emailVerified: false,
       },
-      profile: profiles[0],
-    });
+    };
+
+    // In development mode, provide helpful diagnostics
+    if (process.env.NODE_ENV !== 'production') {
+      responsePayload.devVerificationUrl = verifyUrl;
+      responsePayload.devNotice = 'Dev Mode: Use devVerificationUrl or inspect console /api/auth/dev/last-email to verify.';
+    }
+
+    res.status(201).json(responsePayload);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Signup failed.';
-    res.status(400).json({ error: msg });
+    sendStructuredError(res, 400, 'SIGNUP_FAILED', msg);
   }
 });
 
-apiRouter.post('/auth/verify-email', (req: Request, res: Response) => {
+// Email verification
+apiRouter.post('/auth/verify-email', authRateLimiter, async (req: Request, res: Response) => {
   try {
     const { token } = req.body;
     if (!token) {
-      return res.status(400).json({ error: 'Verification token is required.' });
+      return sendStructuredError(res, 400, 'MISSING_TOKEN', 'Verification token is required.');
     }
 
-    const verifiedUser = db.verifyEmailToken(token);
+    const verifiedUser = await db.verifyEmailToken(token);
     const authToken = generateToken(verifiedUser);
-    const profiles = db.getProfilesByUser(verifiedUser.id);
+    const profile = await db.getProfileByUserId(verifiedUser.id);
 
     res.json({
       message: 'Email successfully verified! Your account is now active.',
@@ -83,43 +151,46 @@ apiRouter.post('/auth/verify-email', (req: Request, res: Response) => {
         id: verifiedUser.id,
         name: verifiedUser.name,
         email: verifiedUser.email,
-        emailVerified: verifiedUser.emailVerified,
+        emailVerified: true,
       },
-      profile: profiles[0],
+      profile,
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Email verification failed.';
-    res.status(400).json({ error: msg });
+    sendStructuredError(res, 400, 'VERIFICATION_FAILED', msg);
   }
 });
 
-apiRouter.post('/auth/login', async (req: Request, res: Response) => {
+// Email login
+apiRouter.post('/auth/login', authRateLimiter, async (req: Request, res: Response) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) {
-      return res.status(400).json({ error: 'Email and password are required.' });
+      return sendStructuredError(res, 400, 'MISSING_CREDENTIALS', 'Email and password are required.');
     }
 
-    const user = db.getUserByEmail(email);
+    const user = await db.getUserByEmail(email);
     if (!user) {
-      return res.status(401).json({ error: 'Invalid email or password.' });
+      return sendStructuredError(res, 401, 'INVALID_CREDENTIALS', 'Invalid email or password.');
     }
 
     const isMatch = await db.verifyPassword(password, user.passwordHash);
     if (!isMatch) {
-      return res.status(401).json({ error: 'Invalid email or password.' });
+      return sendStructuredError(res, 401, 'INVALID_CREDENTIALS', 'Invalid email or password.');
     }
 
     if (!user.emailVerified && !user.isDemo) {
       return res.status(403).json({
-        error: 'Please verify your email address before logging in.',
-        requiresVerification: true,
-        email: user.email,
+        error: {
+          code: 'EMAIL_NOT_VERIFIED',
+          message: 'Please verify your email address before logging in.',
+          email: user.email,
+        },
       });
     }
 
     const token = generateToken(user);
-    const profiles = db.getProfilesByUser(user.id);
+    const profile = await db.getProfileByUserId(user.id);
 
     res.json({
       token,
@@ -130,45 +201,91 @@ apiRouter.post('/auth/login', async (req: Request, res: Response) => {
         emailVerified: user.emailVerified,
         isDemo: user.isDemo,
       },
-      profile: profiles[0],
+      profile,
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Login failed.';
-    res.status(500).json({ error: msg });
+    sendStructuredError(res, 500, 'LOGIN_FAILED', msg);
   }
 });
 
-apiRouter.post('/auth/demo-login', (_req: Request, res: Response) => {
-  const demoUser = db.getUserByEmail('alex.rivera.demo@resumex.ai') || db.getUserByEmail('demo@resumex.ai');
-  if (!demoUser) {
-    return res.status(500).json({ error: 'Demo user not found.' });
-  }
-  const token = generateToken(demoUser);
-  const profiles = db.getProfilesByUser(demoUser.id);
-
-  res.json({
-    token,
-    user: {
-      id: demoUser.id,
-      name: demoUser.name,
-      email: demoUser.email,
-      emailVerified: demoUser.emailVerified,
-      isDemo: true,
-    },
-    profile: profiles[0],
-  });
-});
-
-apiRouter.post('/auth/google', async (req: Request, res: Response) => {
+// Demo login (Isolated demo account Alex Rivera)
+apiRouter.post('/auth/demo-login', async (_req: Request, res: Response) => {
   try {
-    const { email, name, googleId } = req.body;
-    if (!email) {
-      return res.status(400).json({ error: 'Email is required for Google OAuth.' });
+    const demoUser = await db.getUserByEmail('alex.rivera.demo@resumex.ai');
+    if (!demoUser) {
+      return sendStructuredError(res, 500, 'DEMO_NOT_SEEDED', 'Demo user could not be loaded.');
     }
 
-    const user = await db.createOrLinkGoogleUser({ email, name: name || 'Google User', googleId });
+    const token = generateToken(demoUser);
+    const profile = await db.getProfileByUserId(demoUser.id);
+
+    res.json({
+      token,
+      user: {
+        id: demoUser.id,
+        name: demoUser.name,
+        email: demoUser.email,
+        emailVerified: true,
+        isDemo: true,
+      },
+      profile,
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Demo login failed.';
+    sendStructuredError(res, 500, 'DEMO_LOGIN_ERROR', msg);
+  }
+});
+
+// Real Google OAuth / OIDC Identity Verification
+apiRouter.post('/auth/google', authRateLimiter, async (req: Request, res: Response) => {
+  try {
+    const { idToken } = req.body;
+    if (!idToken || typeof idToken !== 'string') {
+      return sendStructuredError(
+        res,
+        400,
+        'MISSING_GOOGLE_TOKEN',
+        'A valid Google ID token is required. ResumeX AI does not accept unverified client identities.'
+      );
+    }
+
+    // Verify token with Google's OIDC tokeninfo endpoint
+    const googleTokenInfoUrl = `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`;
+    const googleRes = await fetch(googleTokenInfoUrl);
+
+    if (!googleRes.ok) {
+      return sendStructuredError(
+        res,
+        401,
+        'GOOGLE_AUTH_FAILED',
+        'Google OAuth ID token verification failed or token has expired.'
+      );
+    }
+
+    const tokenPayload = (await googleRes.json()) as {
+      email?: string;
+      email_verified?: string | boolean;
+      name?: string;
+      sub?: string;
+    };
+
+    if (!tokenPayload.email) {
+      return sendStructuredError(res, 400, 'GOOGLE_EMAIL_MISSING', 'Google ID token did not contain an email address.');
+    }
+
+    const isVerified = tokenPayload.email_verified === 'true' || tokenPayload.email_verified === true;
+    if (!isVerified) {
+      return sendStructuredError(res, 403, 'GOOGLE_EMAIL_UNVERIFIED', 'Google account email is not verified.');
+    }
+
+    const user = await db.createOrLinkGoogleUser({
+      email: tokenPayload.email,
+      name: tokenPayload.name || 'Google User',
+    });
+
     const token = generateToken(user);
-    const profiles = db.getProfilesByUser(user.id);
+    const profile = await db.getProfileByUserId(user.id);
 
     res.json({
       token,
@@ -176,43 +293,59 @@ apiRouter.post('/auth/google', async (req: Request, res: Response) => {
         id: user.id,
         name: user.name,
         email: user.email,
-        emailVerified: user.emailVerified,
+        emailVerified: true,
       },
-      profile: profiles[0],
+      profile,
     });
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : 'Google OAuth failed.';
-    res.status(500).json({ error: msg });
+    console.error('Google OAuth error:', err);
+    sendStructuredError(res, 500, 'GOOGLE_AUTH_ERROR', 'An error occurred while verifying Google OAuth.');
   }
 });
 
-apiRouter.post('/auth/forgot-password', (req: Request, res: Response) => {
+// Forgot password
+apiRouter.post('/auth/forgot-password', authRateLimiter, async (req: Request, res: Response) => {
   try {
     const { email } = req.body;
     if (!email) {
-      return res.status(400).json({ error: 'Email address is required.' });
+      return sendStructuredError(res, 400, 'MISSING_EMAIL', 'Email address is required.');
     }
 
-    const { resetToken, expiresAt } = db.createPasswordResetToken(email);
-    res.json({
-      message: `Password reset token generated. Use this token within 1 hour to set a new password.`,
-      resetToken, // Returned for transparent preview & development flow
-      expiresAt,
-    });
+    const result = await db.createPasswordResetToken(email);
+    const host = req.get('host') || 'localhost:3000';
+    const protocol = req.protocol || 'http';
+
+    if (result) {
+      const resetUrl = `${protocol}://${host}/reset-password?token=${result.resetToken}`;
+      const user = await db.getUserByEmail(email);
+      await emailService.sendPasswordResetEmail(email, user?.name || 'Candidate', result.resetToken, resetUrl);
+    }
+
+    // Never reveal whether an email address exists
+    const responsePayload: Record<string, any> = {
+      message: 'If an account exists with this email address, a password reset link has been dispatched.',
+    };
+
+    if (process.env.NODE_ENV !== 'production' && result) {
+      responsePayload.devNotice = 'Dev Mode: Reset link dispatched to dev console and /api/auth/dev/last-email.';
+    }
+
+    res.json(responsePayload);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unable to initiate password reset.';
-    res.status(400).json({ error: msg });
+    sendStructuredError(res, 400, 'RESET_INIT_FAILED', msg);
   }
 });
 
-apiRouter.post('/auth/reset-password', async (req: Request, res: Response) => {
+// Reset password
+apiRouter.post('/auth/reset-password', authRateLimiter, async (req: Request, res: Response) => {
   try {
     const { token, newPassword } = req.body;
     if (!token || !newPassword) {
-      return res.status(400).json({ error: 'Reset token and new password are required.' });
+      return sendStructuredError(res, 400, 'MISSING_FIELDS', 'Reset token and new password are required.');
     }
     if (newPassword.length < 8) {
-      return res.status(400).json({ error: 'New password must be at least 8 characters long.' });
+      return sendStructuredError(res, 400, 'WEAK_PASSWORD', 'New password must be at least 8 characters long.');
     }
 
     await db.resetPasswordWithToken(token, newPassword);
@@ -222,13 +355,24 @@ apiRouter.post('/auth/reset-password', async (req: Request, res: Response) => {
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Password reset failed.';
-    res.status(400).json({ error: msg });
+    sendStructuredError(res, 400, 'RESET_FAILED', msg);
   }
 });
 
-apiRouter.get('/auth/me', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+// Development-only diagnostics route for mailbox inspection
+apiRouter.get('/auth/dev/last-email', (_req: Request, res: Response) => {
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(404).json({ error: 'Endpoint unavailable in production.' });
+  }
+  res.json({
+    mailbox: emailService.getDevMailbox(),
+  });
+});
+
+// Current user info
+apiRouter.get('/auth/me', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   const user = req.user!;
-  const profiles = db.getProfilesByUser(user.id);
+  const profile = await db.getProfileByUserId(user.id);
   res.json({
     user: {
       id: user.id,
@@ -237,28 +381,57 @@ apiRouter.get('/auth/me', requireAuth, (req: AuthenticatedRequest, res: Response
       emailVerified: user.emailVerified,
       isDemo: user.isDemo,
     },
-    profile: profiles[0],
+    profile,
   });
 });
 
-apiRouter.delete('/auth/delete-account', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+// Profile endpoints
+apiRouter.get('/profile', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const profile = await db.getProfileByUserId(req.user!.id);
+    res.json({ profile });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Failed to fetch profile.';
+    sendStructuredError(res, 500, 'PROFILE_FETCH_FAILED', msg);
+  }
+});
+
+apiRouter.put('/profile', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const updated = await db.updateProfile(req.user!.id, req.body);
+    res.json({ profile: updated });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Failed to update profile.';
+    sendStructuredError(res, 400, 'PROFILE_UPDATE_FAILED', msg);
+  }
+});
+
+// Delete account
+apiRouter.delete('/auth/delete-account', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-    db.deleteUserAccount(userId);
+    await db.deleteUserAccount(userId);
     res.json({ success: true, message: 'Your account and all associated resumes and data have been permanently deleted.' });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Failed to delete account.';
-    res.status(500).json({ error: msg });
+    sendStructuredError(res, 500, 'DELETE_ACCOUNT_FAILED', msg);
   }
 });
 
 // --- 3. RESUMES & UPLOAD PIPELINE ---
-apiRouter.get('/resumes', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  const resumes = db.getResumesByUser(req.user!.id);
-  res.json({ resumes });
+
+// List resumes
+apiRouter.get('/resumes', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const resumes = await db.getResumesByUser(req.user!.id);
+    res.json({ resumes });
+  } catch (err) {
+    sendStructuredError(res, 500, 'FETCH_RESUMES_FAILED', 'Failed to retrieve resumes.');
+  }
 });
 
-apiRouter.post('/resumes', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+// Create manual resume
+apiRouter.post('/resumes', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { title, data, templateId } = req.body;
     const defaultData: ResumeData = data || {
@@ -271,123 +444,174 @@ apiRouter.post('/resumes', requireAuth, (req: AuthenticatedRequest, res: Respons
       certifications: [],
       achievements: [],
     };
-    const saved = db.saveResume(
+
+    const saved = await db.saveResume(
       req.user!.id,
       defaultData,
       title || 'Untitled Resume',
-      templateId || 'modern-clean'
+      templateId || 'ats-classic'
     );
+
     const score = scoringEngine.calculateResumeScore(saved.data);
     const ats = atsAnalyzer.analyzeAtsCompatibility(saved.data);
-    db.updateResumeScores(req.user!.id, saved.id, score, ats.overallAtsScore);
-    res.status(201).json({ resume: db.getResume(req.user!.id, saved.id) });
+    const updated = await db.updateResumeScores(req.user!.id, saved.id, score, ats.overallAtsScore);
+
+    res.status(201).json({ resume: updated });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Failed to create resume.';
-    res.status(400).json({ error: msg });
+    sendStructuredError(res, 400, 'CREATE_RESUME_FAILED', msg);
   }
 });
 
-apiRouter.get('/resumes/:id', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+// Get resume details
+apiRouter.get('/resumes/:id', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const resume = db.getResume(req.user!.id, req.params.id);
-    const versions = db.getVersions(req.user!.id, req.params.id);
-    const issues = db.getIssues(req.user!.id, req.params.id);
+    const resume = await db.getResume(req.user!.id, req.params.id);
+    const versions = await db.getVersions(req.user!.id, req.params.id);
+    const issues = await db.getIssues(req.user!.id, req.params.id);
     res.json({ resume, versions, issues });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Resume not found.';
-    res.status(404).json({ error: msg });
+    sendStructuredError(res, 404, 'RESUME_NOT_FOUND', msg);
   }
 });
 
-apiRouter.post('/resumes/upload', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
-  try {
-    const { fileBase64, fileName, mimeType, rawText } = req.body;
+// Upload resume document (Supports both multipart/form-data via Multer AND JSON base64 payloads)
+apiRouter.post(
+  '/resumes/upload',
+  requireAuth,
+  upload.single('file'),
+  async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      let buffer: Buffer | null = null;
+      let fileName = 'resume.pdf';
+      let mimeType = 'application/pdf';
 
-    let parsedResult;
-    if (fileBase64) {
-      const buffer = Buffer.from(fileBase64, 'base64');
-      parsedResult = await documentParser.parseDocument(buffer, mimeType || 'application/pdf', fileName);
-    } else if (rawText) {
-      parsedResult = documentParser.analyzeTextLayout(rawText);
-    } else {
-      return res.status(400).json({ error: 'Provide either a file upload (fileBase64) or raw text.' });
+      if (req.file) {
+        buffer = req.file.buffer;
+        fileName = req.file.originalname;
+        mimeType = req.file.mimetype;
+      } else if (req.body.fileBase64) {
+        buffer = Buffer.from(req.body.fileBase64, 'base64');
+        fileName = req.body.fileName || 'uploaded_resume.pdf';
+        mimeType = req.body.mimeType || 'application/pdf';
+      } else if (req.body.rawText) {
+        // Raw text upload
+        const parsedResult = documentParser.analyzeTextLayout(req.body.rawText);
+        const { data: structuredResume, provenance } = resumeExtractor.extractStructuredResume(parsedResult);
+        const saved = await db.saveResume(
+          req.user!.id,
+          structuredResume,
+          'Pasted Text Resume',
+          'ats-classic',
+          req.body.rawText,
+          'text/plain',
+          'resume.txt'
+        );
+
+        const atsScoreResult = atsAnalyzer.analyzeAtsCompatibility(structuredResume, parsedResult);
+        const scoreResult = scoringEngine.calculateResumeScore(structuredResume);
+        const updated = await db.updateResumeScores(req.user!.id, saved.id, scoreResult, atsScoreResult.overallAtsScore);
+        const issues = optimizationEngine.detectAllIssues(structuredResume);
+        await db.setIssues(req.user!.id, saved.id, issues);
+
+        return res.status(201).json({
+          resume: updated,
+          parsedLayout: parsedResult.layoutInfo,
+          provenance,
+          scores: scoreResult,
+          atsAnalysis: atsScoreResult,
+          issues,
+        });
+      } else {
+        return sendStructuredError(
+          res,
+          400,
+          'MISSING_FILE',
+          'Please provide a resume file (multipart form "file") or JSON fileBase64.'
+        );
+      }
+
+      if (!buffer) {
+        return sendStructuredError(res, 400, 'INVALID_FILE', 'Unable to process resume file buffer.');
+      }
+
+      // Parse document with PDF parser + OCR fallback
+      const parsedResult = await documentParser.parseDocument(buffer, mimeType, fileName);
+      const { data: structuredResume, provenance } = resumeExtractor.extractStructuredResume(parsedResult);
+
+      const title = fileName ? fileName.replace(/\.[^/.]+$/, '') : 'Uploaded Resume';
+      const saved = await db.saveResume(
+        req.user!.id,
+        structuredResume,
+        title,
+        'ats-classic',
+        parsedResult.text,
+        mimeType,
+        fileName
+      );
+
+      const atsScoreResult = atsAnalyzer.analyzeAtsCompatibility(structuredResume, parsedResult);
+      const scoreResult = scoringEngine.calculateResumeScore(structuredResume);
+      const updated = await db.updateResumeScores(req.user!.id, saved.id, scoreResult, atsScoreResult.overallAtsScore);
+
+      const issues = optimizationEngine.detectAllIssues(structuredResume);
+      await db.setIssues(req.user!.id, saved.id, issues);
+
+      res.status(201).json({
+        resume: updated,
+        parsedLayout: parsedResult.layoutInfo,
+        provenance,
+        scores: scoreResult,
+        atsAnalysis: atsScoreResult,
+        issues,
+      });
+    } catch (err: unknown) {
+      console.error('Resume upload error:', err);
+      const msg = err instanceof Error ? err.message : 'Failed to parse resume document.';
+      sendStructuredError(res, 422, 'DOCUMENT_PARSE_FAILED', msg);
     }
-
-    // Run extraction
-    const { data: structuredResume, provenance } = resumeExtractor.extractStructuredResume(parsedResult);
-
-    // Save resume securely with user ownership
-    const saved = db.saveResume(
-      req.user!.id,
-      structuredResume,
-      fileName ? fileName.replace(/\.[^/.]+$/, '') : 'Uploaded Resume',
-      undefined,
-      parsedResult.text,
-      mimeType,
-      fileName
-    );
-
-    // Run initial scoring & ATS analysis
-    const atsScoreResult = atsAnalyzer.analyzeAtsCompatibility(structuredResume, parsedResult);
-    const scoreResult = scoringEngine.calculateResumeScore(structuredResume);
-    db.updateResumeScores(req.user!.id, saved.id, scoreResult, atsScoreResult.overallAtsScore);
-
-    // Run issue detection
-    const issues = optimizationEngine.detectAllIssues(structuredResume);
-    db.setIssues(req.user!.id, saved.id, issues);
-
-    res.status(201).json({
-      resume: db.getResume(req.user!.id, saved.id),
-      parsedLayout: parsedResult.layoutInfo,
-      provenance,
-      scores: scoreResult,
-      atsAnalysis: atsScoreResult,
-      issues,
-    });
-  } catch (err: unknown) {
-    console.error('Resume upload error:', err);
-    const msg = err instanceof Error ? err.message : 'Failed to parse resume document.';
-    res.status(422).json({ error: msg });
   }
-});
+);
 
-apiRouter.put('/resumes/:id', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+// Update resume content
+apiRouter.put('/resumes/:id', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { data, title, templateId } = req.body;
-    const updated = db.updateResumeData(req.user!.id, req.params.id, data, title, templateId);
+    const updated = await db.updateResumeData(req.user!.id, req.params.id, data, title, templateId);
 
-    // Recalculate scores upon manual edits
     const ats = atsAnalyzer.analyzeAtsCompatibility(updated.data);
     const score = scoringEngine.calculateResumeScore(updated.data);
-    db.updateResumeScores(req.user!.id, updated.id, score, ats.overallAtsScore);
+    const finalResume = await db.updateResumeScores(req.user!.id, updated.id, score, ats.overallAtsScore);
 
-    res.json({ resume: db.getResume(req.user!.id, updated.id) });
+    res.json({ resume: finalResume });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Update failed.';
-    res.status(400).json({ error: msg });
+    sendStructuredError(res, 400, 'UPDATE_FAILED', msg);
   }
 });
 
-apiRouter.delete('/resumes/:id', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+// Delete resume
+apiRouter.delete('/resumes/:id', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    db.deleteResume(req.user!.id, req.params.id);
+    await db.deleteResume(req.user!.id, req.params.id);
     res.json({ success: true, message: 'Resume securely deleted.' });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Delete failed.';
-    res.status(404).json({ error: msg });
+    sendStructuredError(res, 404, 'DELETE_FAILED', msg);
   }
 });
 
 // --- 4. RESUME ANALYSIS & SCORING ---
-apiRouter.post('/resumes/:id/analyze', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+apiRouter.post('/resumes/:id/analyze', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const resume = db.getResume(req.user!.id, req.params.id);
+    const resume = await db.getResume(req.user!.id, req.params.id);
     const ats = atsAnalyzer.analyzeAtsCompatibility(resume.data);
     const score = scoringEngine.calculateResumeScore(resume.data);
     const issues = optimizationEngine.detectAllIssues(resume.data);
 
-    db.updateResumeScores(req.user!.id, resume.id, score, ats.overallAtsScore);
-    db.setIssues(req.user!.id, resume.id, issues);
+    await db.updateResumeScores(req.user!.id, resume.id, score, ats.overallAtsScore);
+    await db.setIssues(req.user!.id, resume.id, issues);
 
     res.json({
       score,
@@ -397,17 +621,17 @@ apiRouter.post('/resumes/:id/analyze', requireAuth, (req: AuthenticatedRequest, 
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Analysis failed.';
-    res.status(400).json({ error: msg });
+    sendStructuredError(res, 400, 'ANALYSIS_FAILED', msg);
   }
 });
 
-// --- 5. OPTIMIZATION & RESUMETRUTH VERIFICATION ---
+// --- 5. OPTIMIZATION & RESUMETRUTH ENGINE ---
 apiRouter.post('/resumes/:id/optimize/bullet', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const resume = db.getResume(req.user!.id, req.params.id);
+    const resume = await db.getResume(req.user!.id, req.params.id);
     const { bullet, roleTitle, company } = req.body;
 
-    if (!bullet) return res.status(400).json({ error: 'Bullet text is required.' });
+    if (!bullet) return sendStructuredError(res, 400, 'MISSING_BULLET', 'Bullet text is required.');
 
     const suggestion = await optimizationEngine.rewriteBullet(
       bullet,
@@ -419,13 +643,13 @@ apiRouter.post('/resumes/:id/optimize/bullet', requireAuth, async (req: Authenti
     res.json({ suggestion });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Optimization failed.';
-    res.status(500).json({ error: msg });
+    sendStructuredError(res, 500, 'OPTIMIZE_FAILED', msg);
   }
 });
 
 apiRouter.post('/resumes/:id/optimize/summary', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const resume = db.getResume(req.user!.id, req.params.id);
+    const resume = await db.getResume(req.user!.id, req.params.id);
     const { currentSummary, targetRole } = req.body;
 
     const suggestion = await optimizationEngine.optimizeSummary(
@@ -437,29 +661,29 @@ apiRouter.post('/resumes/:id/optimize/summary', requireAuth, async (req: Authent
     res.json({ suggestion });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Summary optimization failed.';
-    res.status(500).json({ error: msg });
+    sendStructuredError(res, 500, 'OPTIMIZE_SUMMARY_FAILED', msg);
   }
 });
 
-apiRouter.post('/resumes/:id/issues/:issueId/action', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+apiRouter.post('/resumes/:id/issues/:issueId/action', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { action } = req.body; // 'accepted' | 'rejected' | 'edited'
-    const updated = db.updateIssueStatus(req.user!.id, req.params.id, req.params.issueId, action);
+    const { action } = req.body;
+    const updated = await db.updateIssueStatus(req.user!.id, req.params.id, req.params.issueId, action);
     res.json({ issue: updated });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Failed to update issue status.';
-    res.status(400).json({ error: msg });
+    sendStructuredError(res, 400, 'UPDATE_ISSUE_FAILED', msg);
   }
 });
 
-apiRouter.post('/truth/verify', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+apiRouter.post('/truth/verify', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { originalText, proposedText, resumeId } = req.body;
     if (!originalText || !proposedText) {
-      return res.status(400).json({ error: 'originalText and proposedText are required.' });
+      return sendStructuredError(res, 400, 'MISSING_FIELDS', 'originalText and proposedText are required.');
     }
-    const resume = resumeId ? db.getResume(req.user!.id, resumeId) : undefined;
-    const defaultData = {
+
+    let resumeData: ResumeData = {
       personal_info: { name: '', email: '', location: '', phone: '' },
       summary: '',
       skills: [],
@@ -469,41 +693,51 @@ apiRouter.post('/truth/verify', requireAuth, (req: AuthenticatedRequest, res: Re
       certifications: [],
       achievements: [],
     };
-    const verification = resumeTruthEngine.verifyRewrite(originalText, proposedText, resume?.data || defaultData);
+
+    if (resumeId) {
+      try {
+        const r = await db.getResume(req.user!.id, resumeId);
+        resumeData = r.data;
+      } catch {
+        // use fallback empty context
+      }
+    }
+
+    const verification = resumeTruthEngine.verifyRewrite(originalText, proposedText, resumeData);
     res.json({ verification });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Truth verification check failed.';
-    res.status(500).json({ error: msg });
+    sendStructuredError(res, 500, 'TRUTH_CHECK_FAILED', msg);
   }
 });
 
-// --- 6. RESUME VERSIONS & A/B TESTING ---
-apiRouter.get('/resumes/:id/versions', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+// --- 6. RESUME VERSIONS & A/B COMPARISON ---
+apiRouter.get('/resumes/:id/versions', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const versions = db.getVersions(req.user!.id, req.params.id);
+    const versions = await db.getVersions(req.user!.id, req.params.id);
     res.json({ versions });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Error fetching versions.';
-    res.status(400).json({ error: msg });
+    sendStructuredError(res, 400, 'VERSIONS_FETCH_FAILED', msg);
   }
 });
 
-apiRouter.post('/resumes/:id/versions', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+apiRouter.post('/resumes/:id/versions', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { versionName, changeSummary, targetJobId } = req.body;
-    const resume = db.getResume(req.user!.id, req.params.id);
+    const resume = await db.getResume(req.user!.id, req.params.id);
 
     const score = scoringEngine.calculateResumeScore(resume.data);
     const ats = atsAnalyzer.analyzeAtsCompatibility(resume.data);
 
     let jdScore: number | undefined;
     if (targetJobId) {
-      const job = db.getJobDescription(req.user!.id, targetJobId);
-      const match = semanticMatcher.matchResumeToJob(resume.data, job);
+      const job = await db.getJobDescription(req.user!.id, targetJobId);
+      const match = await semanticMatcher.matchResumeToJob(resume.data, job);
       jdScore = match.overallMatch;
     }
 
-    const version = db.createVersion(
+    const version = await db.createVersion(
       req.user!.id,
       resume.id,
       versionName,
@@ -518,90 +752,94 @@ apiRouter.post('/resumes/:id/versions', requireAuth, (req: AuthenticatedRequest,
     res.status(201).json({ version });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Version creation failed.';
-    res.status(400).json({ error: msg });
+    sendStructuredError(res, 400, 'CREATE_VERSION_FAILED', msg);
   }
 });
 
-apiRouter.post('/resumes/:id/versions/compare', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+apiRouter.post('/resumes/:id/versions/compare', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { versionAId, versionBId, targetJobId } = req.body;
-    const versions = db.getVersions(req.user!.id, req.params.id);
+    const versions = await db.getVersions(req.user!.id, req.params.id);
     const verA = versions.find((v) => v.id === versionAId);
     const verB = versions.find((v) => v.id === versionBId);
 
     if (!verA || !verB) {
-      return res.status(404).json({ error: 'One or both versions not found.' });
+      return sendStructuredError(res, 404, 'VERSION_NOT_FOUND', 'One or both versions not found.');
     }
 
     let targetJob;
     if (targetJobId) {
-      targetJob = db.getJobDescription(req.user!.id, targetJobId);
+      targetJob = await db.getJobDescription(req.user!.id, targetJobId);
     }
 
-    const comparison = versionEngine.compareVersions(verA, verB, targetJob);
+    const comparison = await versionEngine.compareVersions(verA, verB, targetJob);
     res.json({ comparison });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Comparison failed.';
-    res.status(400).json({ error: msg });
+    sendStructuredError(res, 400, 'VERSION_COMPARE_FAILED', msg);
   }
 });
 
 // --- 7. JOB DESCRIPTIONS & MATCHING ---
-apiRouter.get('/jobs', requireAuth, (req: AuthenticatedRequest, res: Response) => {
-  const jobs = db.getJobDescriptions(req.user!.id);
-  res.json({ jobs });
+apiRouter.get('/jobs', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const jobs = await db.getJobDescriptions(req.user!.id);
+    res.json({ jobs });
+  } catch (err) {
+    sendStructuredError(res, 500, 'FETCH_JOBS_FAILED', 'Failed to retrieve target job descriptions.');
+  }
 });
 
-apiRouter.post('/jobs', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+apiRouter.post('/jobs', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { rawText, title, company } = req.body;
     if (!rawText || rawText.trim().length < 20) {
-      return res.status(400).json({ error: 'Job description text must be at least 20 characters.' });
+      return sendStructuredError(res, 400, 'TEXT_TOO_SHORT', 'Job description text must be at least 20 characters.');
     }
 
     const parsed = jdAnalyzer.parseJobDescription(rawText, title, company);
-    const saved = db.saveJobDescription(req.user!.id, parsed);
+    const saved = await db.saveJobDescription(req.user!.id, parsed);
 
     res.status(201).json({ job: saved });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Job parse failed.';
-    res.status(400).json({ error: msg });
+    sendStructuredError(res, 400, 'SAVE_JOB_FAILED', msg);
   }
 });
 
-apiRouter.post('/jobs/:jobId/match/:resumeId', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+apiRouter.post('/jobs/:jobId/match/:resumeId', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const job = db.getJobDescription(req.user!.id, req.params.jobId);
-    const resume = db.getResume(req.user!.id, req.params.resumeId);
+    const job = await db.getJobDescription(req.user!.id, req.params.jobId);
+    const resume = await db.getResume(req.user!.id, req.params.resumeId);
 
-    const match = semanticMatcher.matchResumeToJob(resume.data, job);
-    db.saveJobMatch(req.user!.id, resume.id, job.id, match);
+    const match = await semanticMatcher.matchResumeToJob(resume.data, job);
+    await db.saveJobMatch(req.user!.id, resume.id, job.id, match);
 
     res.json({ match });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Matching failed.';
-    res.status(400).json({ error: msg });
+    sendStructuredError(res, 400, 'JOB_MATCH_FAILED', msg);
   }
 });
 
 // --- 8. CAREER GAP ENGINE ---
-apiRouter.post('/career/gap', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+apiRouter.post('/career/gap', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { resumeId, targetRole } = req.body;
-    const resume = db.getResume(req.user!.id, resumeId);
+    const resume = await db.getResume(req.user!.id, resumeId);
     const role = targetRole || 'Senior Full-Stack Engineer';
 
     const gap = careerGapEngine.analyzeCareerGap(resume.data, role);
-    db.saveCareerGap(req.user!.id, role, gap);
+    await db.saveCareerGap(req.user!.id, role, gap);
 
     res.json({ careerGap: gap });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Career gap analysis failed.';
-    res.status(400).json({ error: msg });
+    sendStructuredError(res, 400, 'CAREER_GAP_FAILED', msg);
   }
 });
 
-// --- 9. TEMPLATES (100+ logical configurations) ---
+// --- 9. TEMPLATES ---
 apiRouter.get('/templates', (_req: Request, res: Response) => {
   const templates = templateEngine.getAllTemplates();
   res.json({
@@ -623,7 +861,7 @@ apiRouter.post('/exports/validate', requireAuth, (req: AuthenticatedRequest, res
     res.json({ validation });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Validation failed.';
-    res.status(400).json({ error: msg });
+    sendStructuredError(res, 400, 'VALIDATION_FAILED', msg);
   }
 });
 
@@ -634,11 +872,21 @@ apiRouter.post('/exports/plain-text', requireAuth, (req: AuthenticatedRequest, r
     res.json({ plainText });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Export failed.';
-    res.status(400).json({ error: msg });
+    sendStructuredError(res, 400, 'EXPORT_FAILED', msg);
   }
 });
 
-// --- 11. NLP EVALUATION SUITE ---
+// --- 11. AUDIT TRAIL ---
+apiRouter.get(['/audit', '/audit-logs', '/audit-events'], requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const events = await db.getAuditEvents(req.user!.id);
+    res.json({ events });
+  } catch (err) {
+    sendStructuredError(res, 500, 'AUDIT_FETCH_FAILED', 'Failed to retrieve audit events.');
+  }
+});
+
+// --- 12. NLP EVALUATION SUITE ---
 apiRouter.get('/evaluation', (_req: Request, res: Response) => {
   const report = nlpEvaluation.runEvaluationSuite();
   res.json({ report });
