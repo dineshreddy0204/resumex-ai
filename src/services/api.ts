@@ -14,22 +14,20 @@ import type {
   ExtractedProvenance,
 } from '../types';
 
-const TOKEN_KEY = 'resumex_auth_token';
-
 class ApiClient {
   private token: string | null = null;
 
   constructor() {
-    this.token = localStorage.getItem(TOKEN_KEY);
+    // Clean up any legacy localStorage tokens to ensure HttpOnly cookie security compliance
+    try {
+      localStorage.removeItem('resumex_auth_token');
+    } catch {
+      // Ignore storage access errors
+    }
   }
 
   public setToken(token: string | null) {
     this.token = token;
-    if (token) {
-      localStorage.setItem(TOKEN_KEY, token);
-    } else {
-      localStorage.removeItem(TOKEN_KEY);
-    }
   }
 
   public getToken(): string | null {
@@ -47,6 +45,7 @@ class ApiClient {
     }
 
     const response = await fetch(`/api${endpoint}`, {
+      credentials: 'same-origin', // Transmits secure HttpOnly session cookies
       ...options,
       headers,
     });
@@ -168,8 +167,46 @@ class ApiClient {
     return this.request<{ user: User; profile: UserProfile }>('/auth/me');
   }
 
-  public logout() {
-    this.setToken(null);
+  public async logout(): Promise<void> {
+    try {
+      await this.request('/auth/logout', { method: 'POST' });
+    } catch {
+      // Ignore network errors on logout
+    } finally {
+      this.setToken(null);
+    }
+  }
+
+  public async changePassword(currentPassword: string, newPassword: string): Promise<{ success: boolean; message: string }> {
+    return this.request('/auth/change-password', {
+      method: 'POST',
+      body: JSON.stringify({ currentPassword, newPassword }),
+    });
+  }
+
+  public async getSessions(): Promise<{
+    sessions: Array<{
+      id: string;
+      ipAddress: string;
+      userAgent: string;
+      createdAt: string;
+      expiresAt: string;
+      isCurrent: boolean;
+    }>;
+  }> {
+    return this.request('/auth/sessions');
+  }
+
+  public async revokeSession(sessionId: string): Promise<{ success: boolean; message: string }> {
+    return this.request(`/auth/sessions/${sessionId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  public async revokeAllOtherSessions(): Promise<{ success: boolean; revokedCount: number; message: string }> {
+    return this.request('/auth/sessions-revoke-others', {
+      method: 'DELETE',
+    });
   }
 
   // --- Health ---

@@ -6,6 +6,8 @@ import type { User } from './types';
 
 export interface AuthenticatedRequest extends Request {
   user?: User;
+  token?: string;
+  tokenHash?: string;
 }
 
 // Security Enforcement: In production, JWT_SECRET is strictly mandatory.
@@ -21,6 +23,72 @@ if (!runtimeSecret) {
   console.warn('[Security] Notice: JWT_SECRET not set in environment. Generated ephemeral 256-bit development key.');
 }
 const JWT_SECRET: string = runtimeSecret;
+
+/**
+ * Hash token using SHA-256 for persistent session storage and lookup
+ */
+export function hashToken(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+/**
+ * Extract token from either Authorization Bearer header or HttpOnly cookie
+ */
+export function extractToken(req: Request): string | null {
+  // 1. Authorization header (Bearer <token>)
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    return authHeader.substring(7).trim();
+  }
+
+  // 2. HttpOnly Cookie (resumex_token or resumex_session)
+  const cookieHeader = req.headers.cookie;
+  if (cookieHeader) {
+    const match = cookieHeader.match(/(?:^|;\s*)(?:resumex_token|resumex_session)=([^;]+)/);
+    if (match) {
+      return decodeURIComponent(match[1]).trim();
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Set secure HttpOnly session cookie
+ */
+export function setAuthCookie(res: Response, token: string): void {
+  const isProd = process.env.NODE_ENV === 'production';
+  const maxAgeMs = 7 * 24 * 60 * 60 * 1000; // 7 days
+  const cookieParts = [
+    `resumex_token=${encodeURIComponent(token)}`,
+    'Path=/',
+    `Max-Age=${Math.floor(maxAgeMs / 1000)}`,
+    'HttpOnly',
+    'SameSite=Lax',
+  ];
+  if (isProd) {
+    cookieParts.push('Secure');
+  }
+  res.setHeader('Set-Cookie', cookieParts.join('; '));
+}
+
+/**
+ * Clear session cookie on logout or invalidation
+ */
+export function clearAuthCookie(res: Response): void {
+  const isProd = process.env.NODE_ENV === 'production';
+  const cookieParts = [
+    'resumex_token=',
+    'Path=/',
+    'Max-Age=0',
+    'HttpOnly',
+    'SameSite=Lax',
+  ];
+  if (isProd) {
+    cookieParts.push('Secure');
+  }
+  res.setHeader('Set-Cookie', cookieParts.join('; '));
+}
 
 /**
  * Hash password using bcrypt with work cost factor 12.
@@ -99,19 +167,19 @@ export function verifyToken(token: string): JwtTokenPayload | null {
 }
 
 export async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction) {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+  const token = extractToken(req);
+  if (!token) {
     return res.status(401).json({
       error: {
         code: 'UNAUTHORIZED',
-        message: 'Missing or malformed Authorization header.',
+        message: 'Authentication required. Please provide a valid Authorization header or session cookie.',
       },
     });
   }
 
-  const token = authHeader.substring(7);
   const payload = verifyToken(token);
   if (!payload) {
+    clearAuthCookie(res);
     return res.status(401).json({
       error: {
         code: 'TOKEN_INVALID_OR_EXPIRED',
@@ -121,8 +189,21 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
   }
 
   try {
+    const tokenHash = hashToken(token);
+    const isRevoked = await db.isSessionRevoked(tokenHash);
+    if (isRevoked) {
+      clearAuthCookie(res);
+      return res.status(401).json({
+        error: {
+          code: 'SESSION_REVOKED',
+          message: 'Your session has been signed out or revoked. Please log in again.',
+        },
+      });
+    }
+
     const user = await db.getUserById(payload.sub);
     if (!user) {
+      clearAuthCookie(res);
       return res.status(401).json({
         error: {
           code: 'USER_NOT_FOUND',
@@ -132,6 +213,8 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
     }
 
     req.user = user;
+    req.token = token;
+    req.tokenHash = tokenHash;
     next();
   } catch (err) {
     console.error('Auth verification error:', err);

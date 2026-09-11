@@ -122,6 +122,55 @@ export class DatabaseEngine {
           );
         `);
 
+        // Ensure session and token security tables exist
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS sessions (
+            id VARCHAR(64) PRIMARY KEY,
+            user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            token_hash VARCHAR(255) NOT NULL UNIQUE,
+            ip_address VARCHAR(64),
+            user_agent TEXT,
+            expires_at TIMESTAMPTZ NOT NULL,
+            is_revoked BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+          );
+          CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+          CREATE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash);
+
+          CREATE TABLE IF NOT EXISTS oauth_accounts (
+            id VARCHAR(64) PRIMARY KEY,
+            user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            provider VARCHAR(32) NOT NULL,
+            provider_user_id VARCHAR(255) NOT NULL,
+            email VARCHAR(255),
+            profile_json JSONB,
+            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(provider, provider_user_id)
+          );
+          CREATE INDEX IF NOT EXISTS idx_oauth_accounts_user ON oauth_accounts(user_id);
+
+          CREATE TABLE IF NOT EXISTS password_reset_tokens (
+            id VARCHAR(64) PRIMARY KEY,
+            user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            token_hash VARCHAR(255) NOT NULL UNIQUE,
+            expires_at TIMESTAMPTZ NOT NULL,
+            used_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+          );
+          CREATE INDEX IF NOT EXISTS idx_pw_reset_token_hash ON password_reset_tokens(token_hash);
+
+          CREATE TABLE IF NOT EXISTS email_verification_tokens (
+            id VARCHAR(64) PRIMARY KEY,
+            user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            token_hash VARCHAR(255) NOT NULL UNIQUE,
+            expires_at TIMESTAMPTZ NOT NULL,
+            used_at TIMESTAMPTZ,
+            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+          );
+          CREATE INDEX IF NOT EXISTS idx_email_verify_token_hash ON email_verification_tokens(token_hash);
+        `);
+
         // 3. Ensure demo account exists in PostgreSQL
         await this.seedDemoUser(client);
 
@@ -793,6 +842,131 @@ export class DatabaseEngine {
       [clean]
     );
     return res.rows[0];
+  }
+
+  // --- SESSIONS & MULTI-DEVICE AUTH ---
+  public async createSession(
+    userId: string,
+    tokenHash: string,
+    ipAddress?: string,
+    userAgent?: string,
+    expiresAt?: Date
+  ): Promise<{ id: string; userId: string; expiresAt: string }> {
+    await this.ensureInitialized();
+    const id = crypto.randomUUID();
+    const expiry = expiresAt || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    const now = new Date().toISOString();
+
+    await this.pgPool.query(
+      `INSERT INTO sessions (id, user_id, token_hash, ip_address, user_agent, expires_at, is_revoked, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, FALSE, $7, $7)
+       ON CONFLICT (token_hash) DO UPDATE SET updated_at = $7, is_revoked = FALSE`,
+      [id, userId, tokenHash, ipAddress || 'unknown', userAgent || 'unknown', expiry.toISOString(), now]
+    );
+
+    return { id, userId, expiresAt: expiry.toISOString() };
+  }
+
+  public async isSessionRevoked(tokenHash: string): Promise<boolean> {
+    await this.ensureInitialized();
+    const res = await this.pgPool.query(
+      `SELECT is_revoked, expires_at FROM sessions WHERE token_hash = $1`,
+      [tokenHash]
+    );
+    if (res.rows.length === 0) {
+      return false; // Session not explicitly revoked or created prior to session tracking
+    }
+    const session = res.rows[0];
+    if (session.is_revoked) return true;
+    if (new Date(session.expires_at).getTime() < Date.now()) return true;
+    return false;
+  }
+
+  public async getUserSessions(
+    userId: string,
+    currentTokenHash?: string
+  ): Promise<Array<{ id: string; ipAddress: string; userAgent: string; createdAt: string; expiresAt: string; isCurrent: boolean }>> {
+    await this.ensureInitialized();
+    const res = await this.pgPool.query(
+      `SELECT id, ip_address as "ipAddress", user_agent as "userAgent", created_at as "createdAt", expires_at as "expiresAt", token_hash as "tokenHash"
+       FROM sessions
+       WHERE user_id = $1 AND is_revoked = FALSE AND expires_at > NOW()
+       ORDER BY created_at DESC
+       LIMIT 50`,
+      [userId]
+    );
+
+    return res.rows.map((row) => ({
+      id: row.id,
+      ipAddress: row.ipAddress || 'unknown',
+      userAgent: row.userAgent || 'unknown',
+      createdAt: row.createdAt,
+      expiresAt: row.expiresAt,
+      isCurrent: Boolean(currentTokenHash && row.tokenHash === currentTokenHash),
+    }));
+  }
+
+  public async revokeSession(userId: string, sessionId: string): Promise<boolean> {
+    await this.ensureInitialized();
+    const res = await this.pgPool.query(
+      `UPDATE sessions SET is_revoked = TRUE, updated_at = NOW() WHERE id = $1 AND user_id = $2 RETURNING id`,
+      [sessionId, userId]
+    );
+    if (res.rows.length > 0) {
+      await this.logAudit(userId, 'SESSION_REVOKED', 'Session', sessionId);
+      return true;
+    }
+    return false;
+  }
+
+  public async revokeAllSessions(userId: string, exceptTokenHash?: string): Promise<number> {
+    await this.ensureInitialized();
+    let query = `UPDATE sessions SET is_revoked = TRUE, updated_at = NOW() WHERE user_id = $1 AND is_revoked = FALSE`;
+    const params: any[] = [userId];
+
+    if (exceptTokenHash) {
+      query += ` AND token_hash != $2`;
+      params.push(exceptTokenHash);
+    }
+
+    const res = await this.pgPool.query(query, params);
+    await this.logAudit(userId, 'ALL_SESSIONS_REVOKED', 'Session', userId);
+    return res.rowCount || 0;
+  }
+
+  public async changeUserPassword(userId: string, currentPass: string, newPass: string): Promise<boolean> {
+    await this.ensureInitialized();
+    const user = await this.getUserById(userId);
+    if (!user) throw new Error('User not found.');
+
+    const isMatch = await this.verifyPassword(currentPass, user.passwordHash);
+    if (!isMatch) throw new Error('Incorrect current password.');
+
+    const newHash = await this.hashPassword(newPass);
+    await this.pgPool.query(
+      `UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2`,
+      [newHash, userId]
+    );
+
+    await this.logAudit(userId, 'PASSWORD_CHANGED', 'User', userId);
+    return true;
+  }
+
+  public async createOrLinkOAuthAccount(
+    userId: string,
+    provider: string,
+    providerUserId: string,
+    email?: string,
+    profileJson?: any
+  ): Promise<void> {
+    await this.ensureInitialized();
+    await this.pgPool.query(
+      `INSERT INTO oauth_accounts (id, user_id, provider, provider_user_id, email, profile_json, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW())
+       ON CONFLICT (provider, provider_user_id) DO UPDATE
+       SET email = EXCLUDED.email, profile_json = EXCLUDED.profile_json`,
+      [crypto.randomUUID(), userId, provider, providerUserId, email || null, profileJson ? JSON.stringify(profileJson) : null]
+    );
   }
 
   // --- PROFILES ---

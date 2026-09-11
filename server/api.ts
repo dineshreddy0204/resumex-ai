@@ -4,7 +4,14 @@ import type { Request, Response, NextFunction } from 'express';
 import multer from 'multer';
 import type { ResumeData } from './types';
 import { db } from './db';
-import { generateToken, requireAuth, type AuthenticatedRequest } from './auth';
+import {
+  generateToken,
+  requireAuth,
+  setAuthCookie,
+  clearAuthCookie,
+  hashToken,
+  type AuthenticatedRequest,
+} from './auth';
 import { documentParser } from './services/documentParser';
 import { resumeExtractor } from './services/resumeExtractor';
 import { atsAnalyzer } from './services/atsAnalyzer';
@@ -24,6 +31,16 @@ import { isGeminiAvailable } from './gemini';
 export const apiRouter = express.Router();
 apiRouter.use(express.json({ limit: '15mb' }));
 
+// Global Security & Observability Headers
+apiRouter.use((req: Request, res: Response, next: NextFunction) => {
+  const requestId = (req.headers['x-request-id'] as string) || crypto.randomUUID();
+  res.setHeader('X-Request-Id', requestId);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  next();
+});
+
 // Multer configured with memory storage and strict 15MB limit
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -32,11 +49,12 @@ const upload = multer({
 
 // Helper for structured errors
 function sendStructuredError(res: Response, status: number, code: string, message: string) {
+  const reqId = (res.getHeader('X-Request-Id') as string) || crypto.randomUUID();
   return res.status(status).json({
     error: {
       code,
       message,
-      requestId: crypto.randomUUID(),
+      requestId: reqId,
       timestamp: new Date().toISOString(),
     },
   });
@@ -142,6 +160,13 @@ apiRouter.post('/auth/verify-email', authRateLimiter, async (req: Request, res: 
 
     const verifiedUser = await db.verifyEmailToken(token);
     const authToken = generateToken(verifiedUser);
+    const tokenHash = hashToken(authToken);
+    const ip = (req.ip || req.socket.remoteAddress || 'unknown') as string;
+    const ua = (req.headers['user-agent'] || 'unknown') as string;
+
+    await db.createSession(verifiedUser.id, tokenHash, ip, ua);
+    setAuthCookie(res, authToken);
+
     const profile = await db.getProfileByUserId(verifiedUser.id);
 
     res.json({
@@ -190,6 +215,13 @@ apiRouter.post('/auth/login', authRateLimiter, async (req: Request, res: Respons
     }
 
     const token = generateToken(user);
+    const tokenHash = hashToken(token);
+    const ip = (req.ip || req.socket.remoteAddress || 'unknown') as string;
+    const ua = (req.headers['user-agent'] || 'unknown') as string;
+
+    await db.createSession(user.id, tokenHash, ip, ua);
+    setAuthCookie(res, token);
+
     const profile = await db.getProfileByUserId(user.id);
 
     res.json({
@@ -210,7 +242,7 @@ apiRouter.post('/auth/login', authRateLimiter, async (req: Request, res: Respons
 });
 
 // Demo login (Isolated demo account Alex Rivera)
-apiRouter.post('/auth/demo-login', async (_req: Request, res: Response) => {
+apiRouter.post('/auth/demo-login', async (req: Request, res: Response) => {
   try {
     const demoUser = await db.getUserByEmail('alex.rivera.demo@resumex.ai');
     if (!demoUser) {
@@ -218,6 +250,13 @@ apiRouter.post('/auth/demo-login', async (_req: Request, res: Response) => {
     }
 
     const token = generateToken(demoUser);
+    const tokenHash = hashToken(token);
+    const ip = (req.ip || req.socket.remoteAddress || 'unknown') as string;
+    const ua = (req.headers['user-agent'] || 'unknown') as string;
+
+    await db.createSession(demoUser.id, tokenHash, ip, ua);
+    setAuthCookie(res, token);
+
     const profile = await db.getProfileByUserId(demoUser.id);
 
     res.json({
@@ -284,7 +323,18 @@ apiRouter.post('/auth/google', authRateLimiter, async (req: Request, res: Respon
       name: tokenPayload.name || 'Google User',
     });
 
+    if (tokenPayload.sub) {
+      await db.createOrLinkOAuthAccount(user.id, 'google', tokenPayload.sub, tokenPayload.email, tokenPayload);
+    }
+
     const token = generateToken(user);
+    const tokenHash = hashToken(token);
+    const ip = (req.ip || req.socket.remoteAddress || 'unknown') as string;
+    const ua = (req.headers['user-agent'] || 'unknown') as string;
+
+    await db.createSession(user.id, tokenHash, ip, ua);
+    setAuthCookie(res, token);
+
     const profile = await db.getProfileByUserId(user.id);
 
     res.json({
@@ -300,6 +350,77 @@ apiRouter.post('/auth/google', authRateLimiter, async (req: Request, res: Respon
   } catch (err: unknown) {
     console.error('Google OAuth error:', err);
     sendStructuredError(res, 500, 'GOOGLE_AUTH_ERROR', 'An error occurred while verifying Google OAuth.');
+  }
+});
+
+// Logout endpoint with session revocation and cookie clearing
+apiRouter.post('/auth/logout', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    if (req.tokenHash) {
+      await db.getPool().query(
+        'UPDATE sessions SET is_revoked = TRUE, updated_at = NOW() WHERE token_hash = $1',
+        [req.tokenHash]
+      );
+    }
+    clearAuthCookie(res);
+    await db.logAudit(req.user!.id, 'USER_LOGOUT', 'User', req.user!.id);
+    res.json({ success: true, message: 'Logged out successfully.' });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Logout failed.';
+    sendStructuredError(res, 500, 'LOGOUT_FAILED', msg);
+  }
+});
+
+// Change Password
+apiRouter.post('/auth/change-password', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    if (!currentPassword || !newPassword) {
+      return sendStructuredError(res, 400, 'MISSING_FIELDS', 'Current password and new password are required.');
+    }
+    if (typeof newPassword !== 'string' || newPassword.length < 8) {
+      return sendStructuredError(res, 400, 'WEAK_PASSWORD', 'New password must be at least 8 characters long.');
+    }
+
+    await db.changeUserPassword(req.user!.id, currentPassword, newPassword);
+    res.json({ success: true, message: 'Password updated successfully.' });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Password change failed.';
+    sendStructuredError(res, 400, 'CHANGE_PASSWORD_FAILED', msg);
+  }
+});
+
+// Multi-device active sessions management
+apiRouter.get('/auth/sessions', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const sessions = await db.getUserSessions(req.user!.id, req.tokenHash);
+    res.json({ sessions });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Failed to retrieve sessions.';
+    sendStructuredError(res, 500, 'FETCH_SESSIONS_FAILED', msg);
+  }
+});
+
+apiRouter.delete('/auth/sessions/:id', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const revoked = await db.revokeSession(req.user!.id, req.params.id);
+    if (!revoked) {
+      return sendStructuredError(res, 404, 'SESSION_NOT_FOUND', 'Session not found or already revoked.');
+    }
+    res.json({ success: true, message: 'Session revoked successfully.' });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Failed to revoke session.';
+    sendStructuredError(res, 500, 'REVOKE_SESSION_FAILED', msg);
+  }
+});
+
+apiRouter.delete('/auth/sessions-revoke-others', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const revokedCount = await db.revokeAllSessions(req.user!.id, req.tokenHash);
+    res.json({ success: true, revokedCount, message: 'All other active sessions have been revoked.' });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Failed to revoke other sessions.';
+    sendStructuredError(res, 500, 'REVOKE_ALL_SESSIONS_FAILED', msg);
   }
 });
 
