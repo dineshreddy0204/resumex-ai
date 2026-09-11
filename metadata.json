@@ -1,0 +1,6 @@
+{
+  "name": "ResumeX AI — Core Ultra",
+  "description": "AI-powered Resume Intelligence, ATS Simulation, Job Matching, Career Gap Analysis, Resume Optimization, and Resume Builder platform.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
