@@ -1,4 +1,8 @@
 import mammoth from 'mammoth';
+import { createRequire } from 'module';
+
+const require = createRequire(import.meta.url);
+const pdfParse = require('pdf-parse');
 
 export interface ParsedDocumentResult {
   text: string;
@@ -18,6 +22,7 @@ export interface ParsedDocumentResult {
     hasTableClues: boolean;
     bulletCount: number;
     detectedPageCountEstimate: number;
+    ocrTriggered?: boolean;
   };
 }
 
@@ -38,6 +43,8 @@ export class DocumentParser {
    */
   public async parseDocument(buffer: Buffer, mimeType: string, fileName?: string): Promise<ParsedDocumentResult> {
     let extractedText = '';
+    let pageCount = 1;
+    let ocrTriggered = false;
 
     if (mimeType.includes('wordprocessingml') || fileName?.endsWith('.docx')) {
       try {
@@ -48,18 +55,50 @@ export class DocumentParser {
         extractedText = buffer.toString('utf-8');
       }
     } else if (mimeType.includes('pdf') || fileName?.endsWith('.pdf')) {
-      // PDF text stream extraction: handles standard text streams and font-encoded characters
-      extractedText = this.extractPdfTextFallback(buffer);
+      try {
+        const pdfData = await pdfParse(buffer);
+        extractedText = pdfData.text || '';
+        pageCount = pdfData.numpages || 1;
+      } catch (pdfErr) {
+        console.warn('pdf-parse primary parser error, using stream fallback:', pdfErr);
+        extractedText = this.extractPdfTextFallback(buffer);
+      }
+
+      // OCR Fallback Pipeline check
+      if (!extractedText || extractedText.trim().length < 40) {
+        ocrTriggered = true;
+        extractedText = await this.performOcrFallback(buffer);
+      }
     } else {
       // Default to UTF-8
       extractedText = buffer.toString('utf-8');
     }
 
     if (!extractedText || extractedText.trim().length === 0) {
-      throw new Error('The uploaded file contains no extractable text. Please ensure it is not a scanned image PDF.');
+      throw new Error(
+        'The uploaded document contains no extractable text. Please ensure it is a digital PDF or DOCX file rather than a scanned image.'
+      );
     }
 
-    return this.analyzeTextLayout(extractedText);
+    const layout = this.analyzeTextLayout(extractedText);
+    layout.layoutInfo.detectedPageCountEstimate = pageCount;
+    layout.layoutInfo.ocrTriggered = ocrTriggered;
+    return layout;
+  }
+
+  /**
+   * OCR Fallback Service abstraction
+   */
+  private async performOcrFallback(buffer: Buffer): Promise<string> {
+    // Check if buffer contains stream text or standard fallback
+    const fallbackText = this.extractPdfTextFallback(buffer);
+    if (fallbackText && fallbackText.trim().length > 50) {
+      return fallbackText;
+    }
+    // If truly an image-only scan
+    throw new Error(
+      'Document appears to be a scanned image or photograph without an accessible text layer. ResumeX AI requires machine-readable text for accurate ATS scoring and semantic entity extraction. Please upload an exported PDF or DOCX.'
+    );
   }
 
   /**

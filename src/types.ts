@@ -3,6 +3,7 @@ export interface User {
   name: string;
   email: string;
   emailVerified: boolean;
+  isDemo?: boolean;
 }
 
 export interface UserProfile {
@@ -169,6 +170,7 @@ export interface JobDescriptionModel {
 }
 
 export interface JobMatchResult {
+  resumeId?: string;
   jobId: string;
   jobTitle: string;
   overallMatch: number;
@@ -193,6 +195,8 @@ export interface JobMatchResult {
 }
 
 export interface CareerGapAnalysis {
+  userId?: string;
+  resumeId?: string;
   targetRole: string;
   currentSkills: {
     skill: string;

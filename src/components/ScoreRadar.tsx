@@ -36,55 +36,55 @@ export const ScoreRadar: React.FC<ScoreRadarProps> = ({ score, compact = false }
     { label: 'Formatting Safety', value: safeScore.formattingScore ?? 0, weight: '5%' },
   ];
 
-  const getScoreColor = (val: number) => {
-    if (val >= 85) return 'text-emerald-400 border-emerald-500/30 bg-emerald-500/10';
-    if (val >= 70) return 'text-sky-400 border-sky-500/30 bg-sky-500/10';
-    if (val >= 55) return 'text-amber-400 border-amber-500/30 bg-amber-500/10';
-    return 'text-rose-400 border-rose-500/30 bg-rose-500/10';
+  const overall = safeScore.overall ?? 0;
+
+  const getScoreBadge = (val: number) => {
+    if (val >= 85) return 'text-[#4F5D2F] border-[#4F5D2F]/30 bg-[#4F5D2F]/10';
+    if (val >= 70) return 'text-[#C49A3A] border-[#C49A3A]/30 bg-[#C49A3A]/10';
+    return 'text-rose-700 border-rose-200 bg-rose-50';
   };
 
   const getBarColor = (val: number) => {
-    if (val >= 85) return 'bg-emerald-500';
-    if (val >= 70) return 'bg-sky-500';
-    if (val >= 55) return 'bg-amber-500';
+    if (val >= 85) return 'bg-[#4F5D2F]';
+    if (val >= 70) return 'bg-[#C49A3A]';
     return 'bg-rose-500';
   };
 
   return (
     <div className="space-y-6">
       {/* Top Banner with Overall Score */}
-      <div className="flex flex-col sm:flex-row items-center justify-between p-5 rounded-xl bg-slate-900/90 border border-slate-800 shadow-sm gap-4">
+      <div className="flex flex-col sm:flex-row items-center justify-between p-6 rounded-xl bg-white border border-[#EAE8E1] shadow-xs gap-4">
         <div className="flex items-center gap-4">
           <div
-            className={`w-16 h-16 rounded-xl flex items-center justify-center border font-black text-2xl shadow-inner ${getScoreColor(
-              safeScore.overall ?? 0
+            className={`w-16 h-16 rounded-xl flex items-center justify-center border font-black text-2xl shadow-2xs ${getScoreBadge(
+              overall
             )}`}
           >
-            {safeScore.overall ?? 0}
+            {overall}
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <h3 className="text-base font-bold text-white">Overall Resume Score</h3>
-              <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700">
+              <h3 className="text-base font-bold text-[#171713]">Deterministic Resume Quality Score</h3>
+              <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-[#FAF9F5] text-[#6E6E63] border border-[#EAE8E1]">
                 100-Point Formula
               </span>
             </div>
-            <p className="text-xs text-slate-400 mt-0.5">
-              Deterministic weighted evaluation across 9 core hiring dimensions.
+            <p className="text-xs text-[#6E6E63] mt-0.5">
+              Weighted mathematical scoring across 9 core hiring dimensions.
             </p>
           </div>
         </div>
 
         <div className="flex items-center gap-2 text-xs font-medium">
-          {(safeScore.overall ?? 0) >= 80 ? (
-            <div className="flex items-center gap-1.5 text-emerald-400 bg-emerald-500/10 px-3 py-1.5 rounded-lg border border-emerald-500/20">
+          {overall >= 80 ? (
+            <div className="flex items-center gap-1.5 text-[#4F5D2F] bg-[#4F5D2F]/10 px-3 py-1.5 rounded-lg border border-[#4F5D2F]/20 font-semibold">
               <CheckCircle2 className="w-4 h-4" />
               <span>High Recruiter Screening Pass Rate</span>
             </div>
           ) : (
-            <div className="flex items-center gap-1.5 text-amber-400 bg-amber-500/10 px-3 py-1.5 rounded-lg border border-amber-500/20">
+            <div className="flex items-center gap-1.5 text-[#8E6D24] bg-[#C49A3A]/15 px-3 py-1.5 rounded-lg border border-[#C49A3A]/30 font-semibold">
               <AlertCircle className="w-4 h-4" />
-              <span>Optimization Opportunities Found</span>
+              <span>Optimization Opportunities Identified</span>
             </div>
           )}
         </div>
@@ -95,16 +95,16 @@ export const ScoreRadar: React.FC<ScoreRadarProps> = ({ score, compact = false }
         {dimensions.map((dim, idx) => (
           <div
             key={idx}
-            className="p-3.5 rounded-lg bg-slate-900/60 border border-slate-800/80 hover:border-slate-700 transition"
+            className="p-3.5 rounded-lg bg-white border border-[#EAE8E1] shadow-2xs hover:border-[#D5D2C7] transition"
           >
             <div className="flex justify-between items-center text-xs mb-1.5">
-              <span className="font-medium text-slate-200">{dim.label}</span>
+              <span className="font-medium text-[#171713]">{dim.label}</span>
               <div className="flex items-center gap-1">
-                <span className="text-[10px] text-slate-500">({dim.weight})</span>
-                <span className="font-bold text-slate-100">{dim.value}%</span>
+                <span className="text-[10px] text-[#6E6E63]">({dim.weight})</span>
+                <span className="font-bold text-[#171713]">{dim.value}%</span>
               </div>
             </div>
-            <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
+            <div className="w-full h-1.5 bg-[#FAF9F5] border border-[#EAE8E1] rounded-full overflow-hidden">
               <div
                 className={`h-full rounded-full transition-all duration-500 ${getBarColor(dim.value)}`}
                 style={{ width: `${dim.value}%` }}
@@ -116,28 +116,28 @@ export const ScoreRadar: React.FC<ScoreRadarProps> = ({ score, compact = false }
 
       {/* Major Deductions Section */}
       {!compact && safeScore.deductions && safeScore.deductions.length > 0 && (
-        <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800">
+        <div className="p-5 rounded-xl bg-white border border-[#EAE8E1] shadow-xs">
           <div className="flex items-center gap-2 mb-3">
-            <TrendingDown className="w-4 h-4 text-amber-400" />
-            <h4 className="text-xs font-bold text-slate-200 uppercase tracking-wider">
-              Deductions & Root Causes ({safeScore.deductions.length})
+            <TrendingDown className="w-4 h-4 text-[#C49A3A]" />
+            <h4 className="text-xs font-bold text-[#171713] uppercase tracking-wider">
+              Diagnostic Deductions & Root Causes ({safeScore.deductions.length})
             </h4>
           </div>
           <div className="space-y-2.5">
             {safeScore.deductions.map((ded, i) => (
               <div
                 key={i}
-                className="flex flex-col sm:flex-row sm:items-center justify-between p-3 rounded-lg bg-slate-950/60 border border-slate-800/80 gap-2 text-xs"
+                className="flex flex-col sm:flex-row sm:items-center justify-between p-3 rounded-lg bg-[#FAF9F5] border border-[#EAE8E1] gap-2 text-xs"
               >
                 <div className="space-y-0.5">
                   <div className="flex items-center gap-2">
-                    <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-rose-500/20 text-rose-300 border border-rose-500/30">
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-rose-100 text-rose-700 border border-rose-200">
                       -{ded.points} pts
                     </span>
-                    <span className="font-semibold text-slate-200">{ded.category}:</span>
-                    <span className="text-slate-300">{ded.reason}</span>
+                    <span className="font-semibold text-[#171713]">{ded.category}:</span>
+                    <span className="text-[#6E6E63]">{ded.reason}</span>
                   </div>
-                  <div className="text-[11px] text-slate-400 pl-2 border-l border-slate-700">
+                  <div className="text-[11px] text-[#4F5D2F] pl-2 border-l border-[#D5D2C7] font-medium">
                     Fix: {ded.recommendation}
                   </div>
                 </div>

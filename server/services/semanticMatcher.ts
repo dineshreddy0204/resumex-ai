@@ -2,8 +2,63 @@ import type { ResumeData, JobDescriptionModel, JobMatchResult } from '../types';
 import { skillExtractor } from './skillExtractor';
 
 export class SemanticMatcher {
+  /**
+   * Compute Cosine Similarity between two term-frequency/n-gram vector representations.
+   * Formula: cos(A, B) = (A · B) / (||A|| * ||B||)
+   */
+  public calculateCosineSimilarity(vecA: Map<string, number>, vecB: Map<string, number>): number {
+    let dotProduct = 0;
+    let normA = 0;
+    let normB = 0;
+
+    for (const [term, valA] of vecA.entries()) {
+      normA += valA * valA;
+      const valB = vecB.get(term);
+      if (valB !== undefined) {
+        dotProduct += valA * valB;
+      }
+    }
+
+    for (const valB of vecB.values()) {
+      normB += valB * valB;
+    }
+
+    if (normA === 0 || normB === 0) return 0;
+    return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+  }
+
+  /**
+   * Vectorize text into sub-linear TF n-gram features
+   */
+  public vectorizeText(text: string): Map<string, number> {
+    const vec = new Map<string, number>();
+    const tokens = text
+      .toLowerCase()
+      .replace(/[^a-z0-9\s+#.-]/g, ' ')
+      .split(/\s+/)
+      .filter((t) => t.length > 2);
+
+    // Unigrams
+    for (const token of tokens) {
+      vec.set(token, (vec.get(token) || 0) + 1);
+    }
+
+    // Bigrams (for contextual concepts like "distributed systems", "ci cd", etc.)
+    for (let i = 0; i < tokens.length - 1; i++) {
+      const bigram = `${tokens[i]} ${tokens[i + 1]}`;
+      vec.set(bigram, (vec.get(bigram) || 0) + 1.5);
+    }
+
+    // Apply sub-linear scaling: 1 + ln(tf)
+    const scaledVec = new Map<string, number>();
+    for (const [k, count] of vec.entries()) {
+      scaledVec.set(k, 1 + Math.log(count));
+    }
+    return scaledVec;
+  }
+
   public matchResumeToJob(resume: ResumeData, job: JobDescriptionModel): JobMatchResult {
-    // 1. Gather all candidate skills and raw texts for search
+    // 1. Gather all candidate skills and raw texts for corpus
     const candidateSkillsNormalized = new Set<string>();
     const resumeTextPieces: string[] = [];
 
@@ -36,8 +91,9 @@ export class SemanticMatcher {
     }
 
     const fullResumeCorpus = resumeTextPieces.join(' \n ').toLowerCase();
+    const fullJobCorpus = `${job.title}\n${job.rawText}\n${job.responsibilities.join(' ')}\n${job.requiredSkills.join(' ')}`.toLowerCase();
 
-    // 2. Skill Match calculation
+    // 2. Hybrid Skill Match (Exact + Normalized)
     const matchedSkills: JobMatchResult['matchedSkills'] = [];
     const missingSkills: JobMatchResult['missingSkills'] = [];
 
@@ -74,7 +130,7 @@ export class SemanticMatcher {
         matchedSkills.push({
           skill: normSkill,
           evidenceInResume: evidence,
-          confidence: inSkillsList && inText ? 0.96 : 0.88,
+          confidence: inSkillsList && inText ? 0.98 : 0.90,
         });
       } else {
         missingSkills.push({
@@ -98,8 +154,14 @@ export class SemanticMatcher {
     }
     const keywordMatch = keywordCount > 0 ? Math.round((matchedKeywordCount / keywordCount) * 100) : skillMatch;
 
-    // 4. Experience Match
-    // Approximate candidate years of experience
+    // 4. Vector Cosine Semantic Match
+    const resumeVec = this.vectorizeText(fullResumeCorpus);
+    const jobVec = this.vectorizeText(fullJobCorpus);
+    const rawCosine = this.calculateCosineSimilarity(resumeVec, jobVec);
+    // Scale cosine score typically ranging 0.35-0.85 in document retrieval to a 0-100 index
+    const semanticMatch = Math.min(99, Math.max(40, Math.round((rawCosine / 0.75) * 100)));
+
+    // 5. Experience Match
     let candidateYears = 0;
     for (const exp of resume.experience) {
       const start = parseInt((exp.startDate.match(/\d{4}/) || ['2020'])[0], 10);
@@ -108,7 +170,6 @@ export class SemanticMatcher {
         : parseInt((exp.endDate.match(/\d{4}/) || [String(start + 1)])[0], 10);
       candidateYears += Math.max(1, end - start);
     }
-    // Deduplicate overlapping spans
     candidateYears = Math.min(15, Math.max(1, candidateYears));
 
     let experienceMatch = 100;
@@ -120,7 +181,7 @@ export class SemanticMatcher {
       experienceAlignmentNote = `Job requires ${job.experienceYearsRequired}+ years; candidate profile demonstrates ~${candidateYears} years (${gap} year delta).`;
     }
 
-    // 5. Education Match
+    // 6. Education Match
     let educationMatch = 100;
     if (job.educationRequired) {
       const hasDegree = resume.education.some(
@@ -129,7 +190,7 @@ export class SemanticMatcher {
       educationMatch = hasDegree ? 100 : 75;
     }
 
-    // 6. Responsibility Match
+    // 7. Responsibility Match
     let respMatches = 0;
     for (const resp of job.responsibilities) {
       const tokens = resp.split(/\s+/).filter((t) => t.length > 4);
@@ -137,16 +198,13 @@ export class SemanticMatcher {
       for (const tok of tokens) {
         if (fullResumeCorpus.includes(tok.toLowerCase())) matchedTokenCount++;
       }
-      if (tokens.length > 0 && matchedTokenCount / tokens.length > 0.3) {
+      if (tokens.length > 0 && matchedTokenCount / tokens.length > 0.28) {
         respMatches++;
       }
     }
     const responsibilityMatch = job.responsibilities.length > 0 ? Math.round((respMatches / job.responsibilities.length) * 100) : 88;
 
-    // 7. Semantic Match (Overlap of context concepts)
-    const semanticMatch = Math.round(skillMatch * 0.45 + keywordMatch * 0.25 + responsibilityMatch * 0.3);
-
-    // Overall Match (Weighted)
+    // Overall Hybrid Weighted Match
     const overallMatch = Math.round(
       skillMatch * 0.35 +
         semanticMatch * 0.25 +
@@ -156,7 +214,7 @@ export class SemanticMatcher {
         responsibilityMatch * 0.05
     );
 
-    // Generate actionable recommendations
+    // Actionable recommendations based on real delta
     const recommendations: string[] = [];
     const highPriorityMissing = missingSkills.filter((m) => m.priority === 'High');
     if (highPriorityMissing.length > 0) {
@@ -164,9 +222,14 @@ export class SemanticMatcher {
         `High Priority: Incorporate verified experience with ${highPriorityMissing.slice(0, 3).map((s) => s.skill).join(', ')} into your project or experience bullets.`
       );
     }
+    if (semanticMatch < 75) {
+      recommendations.push(
+        `Vector Cosine Alignment (${semanticMatch}%): Strengthen domain terminology in summary and projects to mirror the position's architectural keywords.`
+      );
+    }
     if (responsibilityMatch < 80) {
       recommendations.push(
-        'Align phrasing: Tailor 1-2 bullet points to directly echo core job responsibilities (e.g. distributed systems, API architecture).'
+        'Align phrasing: Tailor 1-2 bullet points to directly reflect core job responsibilities (e.g. distributed systems, API architecture).'
       );
     }
     if (candidateYears < job.experienceYearsRequired) {

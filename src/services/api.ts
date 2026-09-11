@@ -77,13 +77,69 @@ class ApiClient {
     return data;
   }
 
-  public async signup(name: string, email: string, password: string): Promise<{ user: User; profile: UserProfile; token: string }> {
-    const data = await this.request<{ user: User; profile: UserProfile; token: string }>('/auth/signup', {
+  public async signup(name: string, email: string, password: string): Promise<{ user: User; profile: UserProfile; token?: string; verificationRequired?: boolean; verificationToken?: string }> {
+    const data = await this.request<{ user: User; profile: UserProfile; token?: string; verificationRequired?: boolean; verificationToken?: string }>('/auth/signup', {
       method: 'POST',
       body: JSON.stringify({ name, email, password }),
     });
+    if (data.token) {
+      this.setToken(data.token);
+    }
+    return data;
+  }
+
+  public async verifyEmail(token: string): Promise<{ user: User; profile: UserProfile; token: string }> {
+    const data = await this.request<{ user: User; profile: UserProfile; token: string }>('/auth/verify-email', {
+      method: 'POST',
+      body: JSON.stringify({ token }),
+    });
     this.setToken(data.token);
     return data;
+  }
+
+  public async googleAuth(email: string, name?: string, googleId?: string): Promise<{ user: User; profile: UserProfile; token: string }> {
+    const data = await this.request<{ user: User; profile: UserProfile; token: string }>('/auth/google', {
+      method: 'POST',
+      body: JSON.stringify({ email, name, googleId }),
+    });
+    this.setToken(data.token);
+    return data;
+  }
+
+  public async forgotPassword(email: string): Promise<{ message: string; resetToken?: string; expiresAt?: string }> {
+    return this.request('/auth/forgot-password', {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    });
+  }
+
+  public async resetPassword(token: string, newPassword: string): Promise<{ success: boolean; message: string }> {
+    return this.request('/auth/reset-password', {
+      method: 'POST',
+      body: JSON.stringify({ token, newPassword }),
+    });
+  }
+
+  public async deleteAccount(): Promise<{ success: boolean; message: string }> {
+    const res = await this.request<{ success: boolean; message: string }>('/auth/delete-account', {
+      method: 'DELETE',
+    });
+    this.logout();
+    return res;
+  }
+
+  public async updateProfile(updates: Partial<UserProfile>): Promise<{ profile: UserProfile }> {
+    return this.request('/profile', {
+      method: 'PUT',
+      body: JSON.stringify(updates),
+    });
+  }
+
+  public async verifyTruth(originalText: string, proposedText: string, resumeId?: string): Promise<{ verification: any }> {
+    return this.request('/truth/verify', {
+      method: 'POST',
+      body: JSON.stringify({ originalText, proposedText, resumeId }),
+    });
   }
 
   public async getMe(): Promise<{ user: User; profile: UserProfile }> {
@@ -107,6 +163,17 @@ class ApiClient {
 
   public async getResume(id: string): Promise<{ resume: ResumeDocument; versions: ResumeVersion[]; issues: AnalysisIssue[] }> {
     return this.request(`/resumes/${id}`);
+  }
+
+  public async createResume(payload: {
+    title?: string;
+    data?: any;
+    templateId?: string;
+  }): Promise<{ resume: ResumeDocument }> {
+    return this.request('/resumes', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
   }
 
   public async uploadResume(payload: {

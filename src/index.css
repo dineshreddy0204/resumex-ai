@@ -1,1 +1,91 @@
 @import "tailwindcss";
+
+@layer base {
+  :root {
+    --bg-page: #FAF9F5;
+    --bg-surface: #FFFFFF;
+    --color-primary-olive: #4F5D2F;
+    --color-deep-olive: #37421F;
+    --color-light-olive: #EEF2E6;
+    --color-gold: #C49A3A;
+    --color-soft-gold: #E6D3A3;
+    --color-light-gold: #FBF7ED;
+    --text-primary: #171713;
+    --text-secondary: #6E6E63;
+    --border-subtle: #E5E5DE;
+    --border-light: #F0F0EA;
+  }
+
+  body {
+    background-color: var(--bg-page);
+    color: var(--text-primary);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* Custom scrollbar for ultra-clean look */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #FAF9F5;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #D9D9CF;
+    border-radius: 9999px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #B8B8AD;
+  }
+}
+
+/* Reusable Ultra-White & Olive Card Utility Classes */
+.card-ultra {
+  background-color: #FFFFFF;
+  border: 1px solid #E5E5DE;
+  border-radius: 0.75rem;
+  box-shadow: 0 1px 3px 0 rgba(23, 23, 19, 0.04), 0 1px 2px -1px rgba(23, 23, 19, 0.02);
+}
+
+.card-ultra-hover {
+  transition: all 150ms ease-in-out;
+}
+.card-ultra-hover:hover {
+  border-color: #D4D4CA;
+  box-shadow: 0 4px 6px -1px rgba(23, 23, 19, 0.06), 0 2px 4px -2px rgba(23, 23, 19, 0.04);
+}
+
+.btn-olive {
+  background-color: #4F5D2F;
+  color: #FFFFFF;
+  font-weight: 600;
+  transition: background-color 150ms ease-in-out;
+}
+.btn-olive:hover {
+  background-color: #37421F;
+}
+
+.btn-olive-outline {
+  background-color: #FFFFFF;
+  border: 1px solid #4F5D2F;
+  color: #4F5D2F;
+  font-weight: 600;
+  transition: all 150ms ease-in-out;
+}
+.btn-olive-outline:hover {
+  background-color: #EEF2E6;
+}
+
+.badge-gold {
+  background-color: #FBF7ED;
+  color: #926C15;
+  border: 1px solid #E6D3A3;
+}
+
+.badge-olive {
+  background-color: #EEF2E6;
+  color: #37421F;
+  border: 1px solid #C8D6B5;
+}

@@ -1,5 +1,6 @@
 import express from 'express';
 import type { Request, Response } from 'express';
+import type { ResumeData } from './types';
 import { db } from './db';
 import { generateToken, requireAuth, type AuthenticatedRequest } from './auth';
 import { documentParser } from './services/documentParser';
@@ -14,6 +15,7 @@ import { versionEngine } from './services/versionEngine';
 import { templateEngine } from './services/templateEngine';
 import { exportEngine } from './services/exportEngine';
 import { nlpEvaluation } from './services/nlpEvaluation';
+import { resumeTruthEngine } from './services/resumeTruthEngine';
 import { isGeminiAvailable } from './gemini';
 
 export const apiRouter = express.Router();
@@ -31,23 +33,24 @@ apiRouter.get('/health', (_req: Request, res: Response) => {
   });
 });
 
-// --- 2. AUTHENTICATION ---
-apiRouter.post('/auth/signup', (req: Request, res: Response) => {
+// --- 2. AUTHENTICATION & SECURITY ---
+apiRouter.post('/auth/signup', async (req: Request, res: Response) => {
   try {
     const { name, email, password } = req.body;
     if (!name || !email || !password) {
       return res.status(400).json({ error: 'Name, email, and password are required.' });
     }
-    if (password.length < 6) {
-      return res.status(400).json({ error: 'Password must be at least 6 characters long.' });
+    if (password.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters long.' });
     }
 
-    const user = db.createUser(name, email, password);
-    const token = generateToken(user);
+    const { user, verificationToken } = await db.createUser(name, email, password);
     const profiles = db.getProfilesByUser(user.id);
 
     res.status(201).json({
-      token,
+      message: 'Account created successfully. Please verify your email address to activate your account.',
+      verificationRequired: true,
+      verificationToken, // Provided directly for immediate sandbox verification UX
       user: {
         id: user.id,
         name: user.name,
@@ -62,7 +65,35 @@ apiRouter.post('/auth/signup', (req: Request, res: Response) => {
   }
 });
 
-apiRouter.post('/auth/login', (req: Request, res: Response) => {
+apiRouter.post('/auth/verify-email', (req: Request, res: Response) => {
+  try {
+    const { token } = req.body;
+    if (!token) {
+      return res.status(400).json({ error: 'Verification token is required.' });
+    }
+
+    const verifiedUser = db.verifyEmailToken(token);
+    const authToken = generateToken(verifiedUser);
+    const profiles = db.getProfilesByUser(verifiedUser.id);
+
+    res.json({
+      message: 'Email successfully verified! Your account is now active.',
+      token: authToken,
+      user: {
+        id: verifiedUser.id,
+        name: verifiedUser.name,
+        email: verifiedUser.email,
+        emailVerified: verifiedUser.emailVerified,
+      },
+      profile: profiles[0],
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Email verification failed.';
+    res.status(400).json({ error: msg });
+  }
+});
+
+apiRouter.post('/auth/login', async (req: Request, res: Response) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) {
@@ -70,10 +101,72 @@ apiRouter.post('/auth/login', (req: Request, res: Response) => {
     }
 
     const user = db.getUserByEmail(email);
-    if (!user || !db.verifyPassword(password, user.passwordHash)) {
+    if (!user) {
       return res.status(401).json({ error: 'Invalid email or password.' });
     }
 
+    const isMatch = await db.verifyPassword(password, user.passwordHash);
+    if (!isMatch) {
+      return res.status(401).json({ error: 'Invalid email or password.' });
+    }
+
+    if (!user.emailVerified && !user.isDemo) {
+      return res.status(403).json({
+        error: 'Please verify your email address before logging in.',
+        requiresVerification: true,
+        email: user.email,
+      });
+    }
+
+    const token = generateToken(user);
+    const profiles = db.getProfilesByUser(user.id);
+
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        emailVerified: user.emailVerified,
+        isDemo: user.isDemo,
+      },
+      profile: profiles[0],
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Login failed.';
+    res.status(500).json({ error: msg });
+  }
+});
+
+apiRouter.post('/auth/demo-login', (_req: Request, res: Response) => {
+  const demoUser = db.getUserByEmail('alex.rivera.demo@resumex.ai') || db.getUserByEmail('demo@resumex.ai');
+  if (!demoUser) {
+    return res.status(500).json({ error: 'Demo user not found.' });
+  }
+  const token = generateToken(demoUser);
+  const profiles = db.getProfilesByUser(demoUser.id);
+
+  res.json({
+    token,
+    user: {
+      id: demoUser.id,
+      name: demoUser.name,
+      email: demoUser.email,
+      emailVerified: demoUser.emailVerified,
+      isDemo: true,
+    },
+    profile: profiles[0],
+  });
+});
+
+apiRouter.post('/auth/google', async (req: Request, res: Response) => {
+  try {
+    const { email, name, googleId } = req.body;
+    if (!email) {
+      return res.status(400).json({ error: 'Email is required for Google OAuth.' });
+    }
+
+    const user = await db.createOrLinkGoogleUser({ email, name: name || 'Google User', googleId });
     const token = generateToken(user);
     const profiles = db.getProfilesByUser(user.id);
 
@@ -88,29 +181,49 @@ apiRouter.post('/auth/login', (req: Request, res: Response) => {
       profile: profiles[0],
     });
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : 'Login failed.';
+    const msg = err instanceof Error ? err.message : 'Google OAuth failed.';
     res.status(500).json({ error: msg });
   }
 });
 
-apiRouter.post('/auth/demo-login', (_req: Request, res: Response) => {
-  const demoUser = db.getUserByEmail('demo@resumex.ai');
-  if (!demoUser) {
-    return res.status(500).json({ error: 'Demo user not found' });
-  }
-  const token = generateToken(demoUser);
-  const profiles = db.getProfilesByUser(demoUser.id);
+apiRouter.post('/auth/forgot-password', (req: Request, res: Response) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ error: 'Email address is required.' });
+    }
 
-  res.json({
-    token,
-    user: {
-      id: demoUser.id,
-      name: demoUser.name,
-      email: demoUser.email,
-      emailVerified: demoUser.emailVerified,
-    },
-    profile: profiles[0],
-  });
+    const { resetToken, expiresAt } = db.createPasswordResetToken(email);
+    res.json({
+      message: `Password reset token generated. Use this token within 1 hour to set a new password.`,
+      resetToken, // Returned for transparent preview & development flow
+      expiresAt,
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Unable to initiate password reset.';
+    res.status(400).json({ error: msg });
+  }
+});
+
+apiRouter.post('/auth/reset-password', async (req: Request, res: Response) => {
+  try {
+    const { token, newPassword } = req.body;
+    if (!token || !newPassword) {
+      return res.status(400).json({ error: 'Reset token and new password are required.' });
+    }
+    if (newPassword.length < 8) {
+      return res.status(400).json({ error: 'New password must be at least 8 characters long.' });
+    }
+
+    await db.resetPasswordWithToken(token, newPassword);
+    res.json({
+      success: true,
+      message: 'Your password has been successfully reset. You can now log in with your new password.',
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Password reset failed.';
+    res.status(400).json({ error: msg });
+  }
 });
 
 apiRouter.get('/auth/me', requireAuth, (req: AuthenticatedRequest, res: Response) => {
@@ -122,23 +235,56 @@ apiRouter.get('/auth/me', requireAuth, (req: AuthenticatedRequest, res: Response
       name: user.name,
       email: user.email,
       emailVerified: user.emailVerified,
+      isDemo: user.isDemo,
     },
     profile: profiles[0],
   });
 });
 
-apiRouter.post('/auth/forgot-password', (req: Request, res: Response) => {
-  const { email } = req.body;
-  // Production safe password reset acknowledgment
-  res.json({
-    message: `If an account exists for ${email}, a secure password reset link has been dispatched.`,
-  });
+apiRouter.delete('/auth/delete-account', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    db.deleteUserAccount(userId);
+    res.json({ success: true, message: 'Your account and all associated resumes and data have been permanently deleted.' });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Failed to delete account.';
+    res.status(500).json({ error: msg });
+  }
 });
 
 // --- 3. RESUMES & UPLOAD PIPELINE ---
 apiRouter.get('/resumes', requireAuth, (req: AuthenticatedRequest, res: Response) => {
   const resumes = db.getResumesByUser(req.user!.id);
   res.json({ resumes });
+});
+
+apiRouter.post('/resumes', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { title, data, templateId } = req.body;
+    const defaultData: ResumeData = data || {
+      personal_info: { name: req.user!.name || 'Candidate', email: req.user!.email || '', phone: '', location: '' },
+      summary: '',
+      skills: [],
+      experience: [],
+      education: [],
+      projects: [],
+      certifications: [],
+      achievements: [],
+    };
+    const saved = db.saveResume(
+      req.user!.id,
+      defaultData,
+      title || 'Untitled Resume',
+      templateId || 'modern-clean'
+    );
+    const score = scoringEngine.calculateResumeScore(saved.data);
+    const ats = atsAnalyzer.analyzeAtsCompatibility(saved.data);
+    db.updateResumeScores(req.user!.id, saved.id, score, ats.overallAtsScore);
+    res.status(201).json({ resume: db.getResume(req.user!.id, saved.id) });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Failed to create resume.';
+    res.status(400).json({ error: msg });
+  }
 });
 
 apiRouter.get('/resumes/:id', requireAuth, (req: AuthenticatedRequest, res: Response) => {
@@ -303,6 +449,31 @@ apiRouter.post('/resumes/:id/issues/:issueId/action', requireAuth, (req: Authent
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Failed to update issue status.';
     res.status(400).json({ error: msg });
+  }
+});
+
+apiRouter.post('/truth/verify', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { originalText, proposedText, resumeId } = req.body;
+    if (!originalText || !proposedText) {
+      return res.status(400).json({ error: 'originalText and proposedText are required.' });
+    }
+    const resume = resumeId ? db.getResume(req.user!.id, resumeId) : undefined;
+    const defaultData = {
+      personal_info: { name: '', email: '', location: '', phone: '' },
+      summary: '',
+      skills: [],
+      experience: [],
+      education: [],
+      projects: [],
+      certifications: [],
+      achievements: [],
+    };
+    const verification = resumeTruthEngine.verifyRewrite(originalText, proposedText, resume?.data || defaultData);
+    res.json({ verification });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Truth verification check failed.';
+    res.status(500).json({ error: msg });
   }
 });
 

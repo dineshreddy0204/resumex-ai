@@ -4,7 +4,13 @@ export interface User {
   email: string;
   passwordHash: string;
   emailVerified: boolean;
+  verificationToken?: string;
+  verificationTokenExpiresAt?: string;
+  resetToken?: string;
+  resetTokenExpiresAt?: string;
+  isDemo?: boolean;
   createdAt: string;
+  updatedAt?: string;
 }
 
 export interface UserProfile {
@@ -189,6 +195,7 @@ export interface JobDescriptionModel {
 }
 
 export interface JobMatchResult {
+  resumeId?: string;
   jobId: string;
   jobTitle: string;
   overallMatch: number;
@@ -213,6 +220,8 @@ export interface JobMatchResult {
 }
 
 export interface CareerGapAnalysis {
+  userId?: string;
+  resumeId?: string;
   targetRole: string;
   currentSkills: {
     skill: string;
@@ -246,15 +255,17 @@ export interface CareerGapAnalysis {
 export interface ResumeVersion {
   id: string;
   resumeId: string;
-  versionNumber: number;
+  versionNumber?: number;
   versionName: string;
   createdAt: string;
-  resumeData: ResumeData;
-  score: ResumeScoreBreakdown;
-  atsScore: number;
+  resumeData?: ResumeData;
+  data?: ResumeData;
+  score?: ResumeScoreBreakdown;
+  atsScore?: number;
   jdMatchScore?: number;
+  targetJobScore?: number;
   targetJobId?: string;
-  changeSummary: string;
+  changeSummary?: string;
 }
 
 export interface TemplateDefinition {
