@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import type { User, UserProfile } from '../../types';
 import {
   User as UserIcon,
@@ -13,9 +13,23 @@ import {
   Clock,
   Sparkles,
   Lock,
+  Laptop,
+  Smartphone,
+  Globe,
+  LogOut,
+  RefreshCw,
 } from 'lucide-react';
 import { ConfirmModal } from '../ConfirmModal';
 import { api } from '../../services/api';
+
+interface SessionItem {
+  id: string;
+  ipAddress: string;
+  userAgent: string;
+  createdAt: string;
+  expiresAt: string;
+  isCurrent: boolean;
+}
 
 interface SettingsViewProps {
   user: User | null;
@@ -44,16 +58,44 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [verifyToken, setVerifyToken] = useState('');
   const [isVerifying, setIsVerifying] = useState(false);
 
-  // Password reset state
+  // Direct Password Change state
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newDirectPassword, setNewDirectPassword] = useState('');
+  const [confirmDirectPassword, setConfirmDirectPassword] = useState('');
+  const [isChangingPassword, setIsChangingPassword] = useState(false);
+
+  // Password reset token state
   const [isRequestingReset, setIsRequestingReset] = useState(false);
   const [showResetModal, setShowResetModal] = useState(false);
   const [resetTokenInput, setResetTokenInput] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [isResetting, setIsResetting] = useState(false);
 
+  // Sessions state
+  const [sessions, setSessions] = useState<SessionItem[]>([]);
+  const [isLoadingSessions, setIsLoadingSessions] = useState(false);
+  const [revokingSessionId, setRevokingSessionId] = useState<string | null>(null);
+  const [isRevokingOthers, setIsRevokingOthers] = useState(false);
+
   // Delete account state
   const [showDeleteModal, setShowDeleteModal] = useState(false);
   const [isDeletingAccount, setIsDeletingAccount] = useState(false);
+
+  const fetchSessions = async () => {
+    setIsLoadingSessions(true);
+    try {
+      const res = await api.getSessions();
+      setSessions(res.sessions || []);
+    } catch {
+      // Sessions may be empty or user not authenticated
+    } finally {
+      setIsLoadingSessions(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchSessions();
+  }, []);
 
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -88,6 +130,61 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       showToast('error', err.message || 'Verification token invalid or expired.');
     } finally {
       setIsVerifying(false);
+    }
+  };
+
+  const handleDirectPasswordChange = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!currentPassword || !newDirectPassword) {
+      showToast('error', 'Please enter your current and new password.');
+      return;
+    }
+    if (newDirectPassword.length < 8) {
+      showToast('error', 'New password must be at least 8 characters long.');
+      return;
+    }
+    if (newDirectPassword !== confirmDirectPassword) {
+      showToast('error', 'New passwords do not match.');
+      return;
+    }
+
+    setIsChangingPassword(true);
+    try {
+      await api.changePassword(currentPassword, newDirectPassword);
+      showToast('success', 'Your password has been updated securely.');
+      setCurrentPassword('');
+      setNewDirectPassword('');
+      setConfirmDirectPassword('');
+    } catch (err: any) {
+      showToast('error', err.message || 'Failed to change password. Check your current password.');
+    } finally {
+      setIsChangingPassword(false);
+    }
+  };
+
+  const handleRevokeSession = async (sessionId: string) => {
+    setRevokingSessionId(sessionId);
+    try {
+      await api.revokeSession(sessionId);
+      showToast('success', 'Session revoked successfully.');
+      setSessions((prev) => prev.filter((s) => s.id !== sessionId));
+    } catch (err: any) {
+      showToast('error', err.message || 'Failed to revoke session.');
+    } finally {
+      setRevokingSessionId(null);
+    }
+  };
+
+  const handleRevokeAllOtherSessions = async () => {
+    setIsRevokingOthers(true);
+    try {
+      const res = await api.revokeAllOtherSessions();
+      showToast('success', res.message || 'All other active sessions have been revoked.');
+      await fetchSessions();
+    } catch (err: any) {
+      showToast('error', err.message || 'Failed to revoke other sessions.');
+    } finally {
+      setIsRevokingOthers(false);
     }
   };
 
@@ -308,20 +405,169 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       </div>
 
       {/* Security & Authentication Card */}
-      <div className="bg-white rounded-xl border border-[#EAE8E1] p-6 shadow-xs space-y-4">
-        <h2 className="text-base font-semibold text-[#171713]">Security & Credentials</h2>
-        <p className="text-xs text-[#6E6E63]">
-          ResumeX AI uses multi-factor cryptographic salt hashing with bcrypt (12 rounds) and HMAC-SHA256 tokens.
-        </p>
+      <div className="bg-white rounded-xl border border-[#EAE8E1] p-6 shadow-xs space-y-6">
+        <div>
+          <h2 className="text-base font-semibold text-[#171713]">Security & Credentials</h2>
+          <p className="text-xs text-[#6E6E63] mt-0.5">
+            Manage your account password, active login sessions across devices, and cryptographic access tokens.
+          </p>
+        </div>
 
+        {/* Change Password Form */}
+        <div className="p-4 rounded-lg bg-[#FAF9F5] border border-[#EAE8E1] space-y-4">
+          <div className="flex items-center gap-2">
+            <Lock className="w-4 h-4 text-[#4F5D2F]" />
+            <h3 className="text-xs font-semibold text-[#171713]">Change Account Password</h3>
+          </div>
+
+          <form onSubmit={handleDirectPasswordChange} className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div>
+              <label className="block text-[11px] font-medium text-[#6E6E63] mb-1">Current Password</label>
+              <input
+                type="password"
+                value={currentPassword}
+                onChange={(e) => setCurrentPassword(e.target.value)}
+                placeholder="Current password"
+                className="w-full px-3 py-1.5 text-xs rounded-lg border border-[#D5D2C7] bg-white focus:outline-none focus:ring-1 focus:ring-[#4F5D2F]"
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] font-medium text-[#6E6E63] mb-1">New Password (8+ chars)</label>
+              <input
+                type="password"
+                value={newDirectPassword}
+                onChange={(e) => setNewDirectPassword(e.target.value)}
+                placeholder="New password"
+                minLength={8}
+                className="w-full px-3 py-1.5 text-xs rounded-lg border border-[#D5D2C7] bg-white focus:outline-none focus:ring-1 focus:ring-[#4F5D2F]"
+                required
+              />
+            </div>
+            <div>
+              <label className="block text-[11px] font-medium text-[#6E6E63] mb-1">Confirm New Password</label>
+              <div className="flex gap-2">
+                <input
+                  type="password"
+                  value={confirmDirectPassword}
+                  onChange={(e) => setConfirmDirectPassword(e.target.value)}
+                  placeholder="Repeat new password"
+                  minLength={8}
+                  className="w-full px-3 py-1.5 text-xs rounded-lg border border-[#D5D2C7] bg-white focus:outline-none focus:ring-1 focus:ring-[#4F5D2F]"
+                  required
+                />
+                <button
+                  type="submit"
+                  disabled={isChangingPassword}
+                  className="px-3 py-1.5 rounded-lg bg-[#4F5D2F] text-white text-xs font-medium hover:bg-[#37421F] disabled:opacity-50 transition shrink-0"
+                >
+                  {isChangingPassword ? 'Updating...' : 'Update'}
+                </button>
+              </div>
+            </div>
+          </form>
+        </div>
+
+        {/* Multi-Device Sessions */}
+        <div className="p-4 rounded-lg bg-[#FAF9F5] border border-[#EAE8E1] space-y-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Laptop className="w-4 h-4 text-[#4F5D2F]" />
+              <div>
+                <h3 className="text-xs font-semibold text-[#171713]">Active Device Sessions</h3>
+                <p className="text-[11px] text-[#6E6E63]">
+                  Review browser sessions authenticated with HttpOnly cookies & SHA-256 tokens.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={fetchSessions}
+                disabled={isLoadingSessions}
+                className="p-1.5 text-[#6E6E63] hover:text-[#171713] rounded-md hover:bg-white border border-transparent hover:border-[#D5D2C7] transition"
+                title="Refresh sessions"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isLoadingSessions ? 'animate-spin' : ''}`} />
+              </button>
+
+              {sessions.length > 1 && (
+                <button
+                  type="button"
+                  onClick={handleRevokeAllOtherSessions}
+                  disabled={isRevokingOthers}
+                  className="px-2.5 py-1 text-xs font-medium text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-md transition"
+                >
+                  {isRevokingOthers ? 'Revoking...' : 'Sign Out Other Devices'}
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            {sessions.length === 0 ? (
+              <p className="text-xs text-[#6E6E63] italic py-2">
+                {isLoadingSessions ? 'Loading active sessions...' : 'No active external sessions found.'}
+              </p>
+            ) : (
+              sessions.map((sess) => {
+                const isMobile = /mobile|iphone|android/i.test(sess.userAgent);
+                return (
+                  <div
+                    key={sess.id}
+                    className="flex items-center justify-between p-2.5 rounded-md bg-white border border-[#EAE8E1] text-xs"
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className="w-8 h-8 rounded-full bg-[#FAF9F5] border border-[#EAE8E1] flex items-center justify-center text-[#4F5D2F]">
+                        {isMobile ? <Smartphone className="w-4 h-4" /> : <Laptop className="w-4 h-4" />}
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-[#171713]">
+                            {sess.ipAddress === 'unknown' ? 'Local / Direct Network' : `IP: ${sess.ipAddress}`}
+                          </span>
+                          {sess.isCurrent && (
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-[#4F5D2F]/10 text-[#4F5D2F] border border-[#4F5D2F]/20">
+                              Current Device
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-[#6E6E63] truncate max-w-sm mt-0.5">
+                          {sess.userAgent}
+                        </p>
+                        <p className="text-[10px] text-[#A0A096] mt-0.5">
+                          Logged in {new Date(sess.createdAt).toLocaleString()}
+                        </p>
+                      </div>
+                    </div>
+
+                    {!sess.isCurrent && (
+                      <button
+                        type="button"
+                        onClick={() => handleRevokeSession(sess.id)}
+                        disabled={revokingSessionId === sess.id}
+                        className="px-2.5 py-1 text-xs text-rose-600 hover:text-rose-700 hover:bg-rose-50 rounded border border-rose-200 transition"
+                      >
+                        {revokingSessionId === sess.id ? 'Revoking...' : 'Revoke'}
+                      </button>
+                    )}
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+
+        {/* Password Reset Recovery Token Option */}
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-4 rounded-lg bg-[#FAF9F5] border border-[#EAE8E1]">
           <div>
             <h4 className="text-xs font-semibold text-[#171713] flex items-center gap-1.5">
               <KeyRound className="w-4 h-4 text-[#4F5D2F]" />
-              Password & Access Recovery
+              Password Reset Token Recovery
             </h4>
             <p className="text-xs text-[#6E6E63] mt-0.5">
-              Generate a secure, single-use password reset token with immediate cryptographic validation.
+              Need a recovery token without knowing current credentials? Generate a single-use token.
             </p>
           </div>
 
@@ -330,7 +576,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             disabled={isRequestingReset}
             className="px-3.5 py-1.5 rounded-lg border border-[#D5D2C7] bg-white text-xs font-medium text-[#171713] hover:bg-[#FAF9F5] disabled:opacity-50 transition shrink-0"
           >
-            {isRequestingReset ? 'Generating Token...' : 'Change / Reset Password'}
+            {isRequestingReset ? 'Generating Token...' : 'Generate Reset Token'}
           </button>
         </div>
       </div>
