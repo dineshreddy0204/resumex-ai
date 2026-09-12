@@ -154,16 +154,16 @@ export const TemplateGalleryView: React.FC<TemplateGalleryViewProps> = ({
                 {/* Specs */}
                 <div className="grid grid-cols-2 gap-2 mt-4 pt-3 border-t border-[#EAE8E1] text-[11px] text-[#6E6E63]">
                   <div>
-                    Layout: <strong className="text-[#171713] capitalize">{tmpl.layout.replace('-', ' ')}</strong>
+                    Layout: <strong className="text-[#171713] capitalize">{(tmpl.layout || 'single-column').replace(/-/g, ' ')}</strong>
                   </div>
                   <div>
-                    Density: <strong className="text-[#171713] capitalize">{tmpl.spacingDensity}</strong>
+                    Density: <strong className="text-[#171713] capitalize">{tmpl.spacingDensity || 'standard'}</strong>
                   </div>
                   <div>
-                    Font: <strong className="text-[#171713] capitalize">{tmpl.fontFamily.replace('font-', '')}</strong>
+                    Font: <strong className="text-[#171713] capitalize">{(tmpl.fontFamily || 'font-sans').replace(/^font-/, '')}</strong>
                   </div>
                   <div>
-                    Bullets: <strong className="text-[#171713] capitalize">{tmpl.bulletStyle}</strong>
+                    Bullets: <strong className="text-[#171713] capitalize">{tmpl.bulletStyle || 'disc'}</strong>
                   </div>
                 </div>
 

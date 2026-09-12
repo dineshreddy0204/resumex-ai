@@ -85,25 +85,21 @@ export default function App() {
 
       // 2. Auth state
       let currentUser: User | null = null;
-      if (api.getToken()) {
+      try {
+        const me = await api.getMe();
+        setUser(me.user);
+        setProfile(me.profile);
+        currentUser = me.user;
+      } catch {
+        // No active session or token expired: seamlessly initialize demo sandbox session
         try {
-          const me = await api.getMe();
-          setUser(me.user);
-          setProfile(me.profile);
-          currentUser = me.user;
-        } catch {
-          // Token expired or invalid: login demo user
           const demo = await api.demoLogin();
           setUser(demo.user);
           setProfile(demo.profile);
           currentUser = demo.user;
+        } catch (demoErr) {
+          console.error('Demo login fallback error:', demoErr);
         }
-      } else {
-        // First visit: use demo sandbox by default
-        const demo = await api.demoLogin();
-        setUser(demo.user);
-        setProfile(demo.profile);
-        currentUser = demo.user;
       }
 
       // 3. Load Templates
@@ -137,8 +133,24 @@ export default function App() {
         setIssues([]);
         setAtsResult(null);
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to load resumes:', err);
+      // Auto-heal session if authentication expired
+      if (err?.message && (err.message.includes('Authentication required') || err.message.includes('UNAUTHORIZED') || err.message.includes('TOKEN_INVALID'))) {
+        try {
+          const demo = await api.demoLogin();
+          setUser(demo.user);
+          setProfile(demo.profile);
+          const list = await api.getResumes();
+          setResumes(list);
+          if (list.length > 0) {
+            setActiveResume(list[0]);
+            await loadResumeAnalysis(list[0].id);
+          }
+        } catch (retryErr) {
+          console.error('Session recovery failed:', retryErr);
+        }
+      }
     }
   };
 

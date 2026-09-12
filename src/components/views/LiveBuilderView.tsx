@@ -1,8 +1,8 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useMemo } from 'react';
 import type { ResumeDocument, TemplateDefinition, OptimizationSuggestion, ResumeData } from '../../types';
 import { ResumeRenderer } from '../ResumeRenderer';
 import { api } from '../../services/api';
-import { MASTER_TEMPLATES } from '../../constants/templates';
+import { MASTER_TEMPLATES, getFullTemplateCatalog } from '../../constants/templates';
 import { jsPDF } from 'jspdf';
 import {
   Save,
@@ -70,10 +70,23 @@ export const LiveBuilderView: React.FC<LiveBuilderViewProps> = ({
 
   const printContainerRef = useRef<HTMLDivElement>(null);
 
+  const allTemplates = useMemo(() => {
+    return templates && templates.length > 0 ? templates : getFullTemplateCatalog();
+  }, [templates]);
+
   const currentTemplate =
-    templates.find((t) => t.id === selectedTemplateId) ||
+    allTemplates.find((t) => t.id === selectedTemplateId) ||
     MASTER_TEMPLATES.find((t) => t.id === selectedTemplateId) ||
     MASTER_TEMPLATES[0];
+
+  const templateCategories = useMemo(() => {
+    const cats: Record<string, TemplateDefinition[]> = {};
+    for (const tmpl of allTemplates) {
+      if (!cats[tmpl.category]) cats[tmpl.category] = [];
+      cats[tmpl.category].push(tmpl);
+    }
+    return cats;
+  }, [allTemplates]);
 
   const toggleSection = (section: string) => {
     setCollapsedSections((prev) => ({ ...prev, [section]: !prev[section] }));
@@ -395,7 +408,7 @@ export const LiveBuilderView: React.FC<LiveBuilderViewProps> = ({
       }
     }
 
-    doc.save(`${(formData.personal_info?.name || resumeTitle).replace(/\s+/g, '_')}_ResumeX.pdf`);
+    doc.save(`${(formData.personal_info?.name || resumeTitle || 'Resume').replace(/\s+/g, '_')}_ResumeX.pdf`);
     setToastMessage('Formatted PDF downloaded successfully.');
     setTimeout(() => setToastMessage(null), 3000);
   };
@@ -407,7 +420,7 @@ export const LiveBuilderView: React.FC<LiveBuilderViewProps> = ({
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${(formData.personal_info?.name || resumeTitle).replace(/\s+/g, '_')}_ResumeX.docx`;
+      a.download = `${(formData.personal_info?.name || resumeTitle || 'Resume').replace(/\s+/g, '_')}_ResumeX.docx`;
       a.click();
       URL.revokeObjectURL(url);
       setToastMessage('Word Document (.docx) downloaded successfully.');
@@ -426,7 +439,7 @@ export const LiveBuilderView: React.FC<LiveBuilderViewProps> = ({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${resumeTitle.replace(/\s+/g, '_')}.txt`;
+    a.download = `${(resumeTitle || 'Resume').replace(/\s+/g, '_')}.txt`;
     a.click();
     URL.revokeObjectURL(url);
     setToastMessage('Plain text file downloaded.');
@@ -498,10 +511,14 @@ export const LiveBuilderView: React.FC<LiveBuilderViewProps> = ({
               onChange={(e) => setSelectedTemplateId(e.target.value)}
               className="text-xs bg-white border border-[#D5D2C7] text-[#171713] rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-[#4F5D2F] max-w-xs font-medium"
             >
-              {MASTER_TEMPLATES.map((tmpl) => (
-                <option key={tmpl.id} value={tmpl.id}>
-                  {tmpl.name} ({tmpl.category})
-                </option>
+              {Object.entries(templateCategories).map(([category, items]) => (
+                <optgroup key={category} label={category}>
+                  {(items as TemplateDefinition[]).map((tmpl) => (
+                    <option key={tmpl.id} value={tmpl.id}>
+                      {tmpl.name}
+                    </option>
+                  ))}
+                </optgroup>
               ))}
             </select>
           </div>

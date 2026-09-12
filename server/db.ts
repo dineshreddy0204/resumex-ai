@@ -3,6 +3,9 @@ import fs from 'fs';
 import path from 'path';
 import { Pool, type PoolClient } from 'pg';
 import { hashPassword, verifyPassword } from './auth';
+import { MigrationRunner } from './migrationRunner';
+import { scoringEngine } from './services/scoringEngine';
+import { atsAnalyzer } from './services/atsAnalyzer';
 import type {
   User,
   UserProfile,
@@ -89,95 +92,23 @@ export class DatabaseEngine {
     if (this.initPromise) return this.initPromise;
 
     this.initPromise = (async () => {
-      const client = await this.pgPool.connect();
       try {
-        // 1. Run schema DDL if tables missing
-        const schemaPath = path.join(process.cwd(), 'server', 'db', 'schema.sql');
-        if (fs.existsSync(schemaPath)) {
-          const sql = fs.readFileSync(schemaPath, 'utf-8');
-          await client.query(sql);
+        // 1. Run all versioned migrations cleanly
+        await MigrationRunner.runMigrations(this.pgPool);
+
+        // 2. Ensure demo account exists in PostgreSQL
+        const client = await this.pgPool.connect();
+        try {
+          await this.seedDemoUser(client);
+        } finally {
+          client.release();
         }
 
-        // 2. Ensure column migrations and compatibility tables
-        await client.query('ALTER TABLE resumes ADD COLUMN IF NOT EXISTS data_json JSONB;');
-        await client.query('ALTER TABLE job_descriptions ADD COLUMN IF NOT EXISTS seniority_level VARCHAR(64) DEFAULT \'Mid\';');
-        await client.query('ALTER TABLE job_descriptions ADD COLUMN IF NOT EXISTS location VARCHAR(255);');
-        await client.query('ALTER TABLE job_descriptions ADD COLUMN IF NOT EXISTS education_required BOOLEAN DEFAULT TRUE;');
-        await client.query('ALTER TABLE users ADD COLUMN IF NOT EXISTS is_demo BOOLEAN DEFAULT FALSE;');
-        await client.query('ALTER TABLE profiles ADD COLUMN IF NOT EXISTS bio TEXT;');
-
-        // Ensure audit_logs exists alongside audit_events
-        await client.query(`
-          CREATE TABLE IF NOT EXISTS audit_logs (
-            id VARCHAR(64) PRIMARY KEY,
-            user_id VARCHAR(64) REFERENCES users(id) ON DELETE SET NULL,
-            action VARCHAR(128) NOT NULL,
-            entity_type VARCHAR(64),
-            entity_id VARCHAR(64),
-            resource_type VARCHAR(64),
-            resource_id VARCHAR(64),
-            details_json JSONB,
-            ip_address VARCHAR(64),
-            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-          );
-        `);
-
-        // Ensure session and token security tables exist
-        await client.query(`
-          CREATE TABLE IF NOT EXISTS sessions (
-            id VARCHAR(64) PRIMARY KEY,
-            user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            token_hash VARCHAR(255) NOT NULL UNIQUE,
-            ip_address VARCHAR(64),
-            user_agent TEXT,
-            expires_at TIMESTAMPTZ NOT NULL,
-            is_revoked BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-          );
-          CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
-          CREATE INDEX IF NOT EXISTS idx_sessions_token_hash ON sessions(token_hash);
-
-          CREATE TABLE IF NOT EXISTS oauth_accounts (
-            id VARCHAR(64) PRIMARY KEY,
-            user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            provider VARCHAR(32) NOT NULL,
-            provider_user_id VARCHAR(255) NOT NULL,
-            email VARCHAR(255),
-            profile_json JSONB,
-            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE(provider, provider_user_id)
-          );
-          CREATE INDEX IF NOT EXISTS idx_oauth_accounts_user ON oauth_accounts(user_id);
-
-          CREATE TABLE IF NOT EXISTS password_reset_tokens (
-            id VARCHAR(64) PRIMARY KEY,
-            user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            token_hash VARCHAR(255) NOT NULL UNIQUE,
-            expires_at TIMESTAMPTZ NOT NULL,
-            used_at TIMESTAMPTZ,
-            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-          );
-          CREATE INDEX IF NOT EXISTS idx_pw_reset_token_hash ON password_reset_tokens(token_hash);
-
-          CREATE TABLE IF NOT EXISTS email_verification_tokens (
-            id VARCHAR(64) PRIMARY KEY,
-            user_id VARCHAR(64) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-            token_hash VARCHAR(255) NOT NULL UNIQUE,
-            expires_at TIMESTAMPTZ NOT NULL,
-            used_at TIMESTAMPTZ,
-            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-          );
-          CREATE INDEX IF NOT EXISTS idx_email_verify_token_hash ON email_verification_tokens(token_hash);
-        `);
-
-        // 3. Ensure demo account exists in PostgreSQL
-        await this.seedDemoUser(client);
-
         this.isInitialized = true;
-        console.log('[PostgreSQL] Database persistence layer fully initialized.');
-      } finally {
-        client.release();
+        console.log('[PostgreSQL] Database persistence layer fully initialized with versioned migrations.');
+      } catch (err) {
+        console.error('[Database] Initialization error:', err);
+        throw err;
       }
     })();
 
@@ -1083,19 +1014,8 @@ export class DatabaseEngine {
       achievements: [],
     };
 
-    const score = row.score || {
-      overall: row.atsScore || 85,
-      contentQuality: 85,
-      atsCompatibility: row.atsScore || 85,
-      skillsScore: 85,
-      experienceScore: 85,
-      projectsScore: 85,
-      achievementsScore: 85,
-      grammarScore: 90,
-      formattingScore: 90,
-      readabilityScore: 88,
-      deductions: [],
-    };
+    const score: ResumeScoreBreakdown = row.score || scoringEngine.calculateResumeScore(data);
+    const atsScore = row.atsScore || score.atsCompatibility || atsAnalyzer.analyzeAtsCompatibility(data).overallAtsScore;
 
     return {
       id: row.id,
@@ -1107,7 +1027,7 @@ export class DatabaseEngine {
       fileName: row.fileName,
       data,
       score,
-      atsScore: row.atsScore || 85,
+      atsScore,
       templateId: row.templateId || 'ats-classic',
       currentVersionId: row.currentVersionId || '',
       createdAt: row.createdAt instanceof Date ? row.createdAt.toISOString() : row.createdAt,
@@ -1132,19 +1052,9 @@ export class DatabaseEngine {
     const profile = await this.getProfileByUserId(userId);
     const profileId = profile?.id || null;
 
-    const initialScore: ResumeScoreBreakdown = {
-      overall: 85,
-      contentQuality: 85,
-      atsCompatibility: 85,
-      skillsScore: 85,
-      experienceScore: 85,
-      projectsScore: 85,
-      achievementsScore: 85,
-      grammarScore: 90,
-      formattingScore: 90,
-      readabilityScore: 88,
-      deductions: [],
-    };
+    // Calculate real dynamic scores based strictly on evidence in resume data
+    const initialScore = scoringEngine.calculateResumeScore(data);
+    const initialAtsScore = atsAnalyzer.analyzeAtsCompatibility(data).overallAtsScore;
 
     const client = await this.pgPool.connect();
     try {
@@ -1153,7 +1063,7 @@ export class DatabaseEngine {
       // 1. Insert into resumes
       await client.query(
         `INSERT INTO resumes (id, user_id, profile_id, title, raw_text, file_type, file_name, template_id, current_version_id, ats_score, score_json, data_json, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 85, $10, $11, $12, $12)`,
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13)`,
         [
           id,
           userId,
@@ -1164,6 +1074,7 @@ export class DatabaseEngine {
           fileName || 'resume.pdf',
           templateId || 'ats-classic',
           versionId,
+          initialAtsScore,
           JSON.stringify(initialScore),
           JSON.stringify(data),
           now,
@@ -1173,8 +1084,8 @@ export class DatabaseEngine {
       // 2. Insert initial version
       await client.query(
         `INSERT INTO resume_versions (id, resume_id, user_id, version_name, resume_data_json, score_json, ats_score, change_summary, is_active, created_at)
-         VALUES ($1, $2, $3, 'v1.0 — Initial Structured Resume', $4, $5, 85, 'Initial structured extraction and baseline setup.', TRUE, $6)`,
-        [versionId, id, userId, JSON.stringify(data), JSON.stringify(initialScore), now]
+         VALUES ($1, $2, $3, 'v1.0 — Initial Structured Resume', $4, $5, $6, 'Initial structured extraction and baseline setup.', TRUE, $7)`,
+        [versionId, id, userId, JSON.stringify(data), JSON.stringify(initialScore), initialAtsScore, now]
       );
 
       // 3. Populate normalized relational tables
@@ -1403,7 +1314,7 @@ export class DatabaseEngine {
     await this.getResume(userId, resumeId);
 
     const res = await this.pgPool.query(
-      `SELECT id, section, issue_type as "type", severity, evidence, reason, suggestion, confidence, status
+      `SELECT id, section, issue_type, issue_type as "type", severity, evidence, reason, suggestion, confidence, status
        FROM analysis_issues
        WHERE resume_id = $1
        ORDER BY created_at ASC`,
@@ -1430,7 +1341,7 @@ export class DatabaseEngine {
             iss.id || crypto.randomUUID(),
             resumeId,
             iss.section || 'experience',
-            iss.type || 'bullet_weak_impact',
+            iss.issue_type || (iss as any).type || 'bullet_weak_impact',
             iss.severity || 'medium',
             iss.evidence || '',
             iss.reason || '',

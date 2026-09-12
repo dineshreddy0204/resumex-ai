@@ -54,40 +54,127 @@ export function extractToken(req: Request): string | null {
 }
 
 /**
- * Set secure HttpOnly session cookie
+ * Set secure session cookie with cross-origin iframe support
  */
 export function setAuthCookie(res: Response, token: string): void {
-  const isProd = process.env.NODE_ENV === 'production';
   const maxAgeMs = 7 * 24 * 60 * 60 * 1000; // 7 days
   const cookieParts = [
     `resumex_token=${encodeURIComponent(token)}`,
     'Path=/',
     `Max-Age=${Math.floor(maxAgeMs / 1000)}`,
     'HttpOnly',
-    'SameSite=Lax',
+    'SameSite=None',
+    'Secure',
   ];
-  if (isProd) {
-    cookieParts.push('Secure');
-  }
-  res.setHeader('Set-Cookie', cookieParts.join('; '));
+  res.append('Set-Cookie', cookieParts.join('; '));
 }
 
 /**
  * Clear session cookie on logout or invalidation
  */
 export function clearAuthCookie(res: Response): void {
-  const isProd = process.env.NODE_ENV === 'production';
   const cookieParts = [
     'resumex_token=',
     'Path=/',
     'Max-Age=0',
     'HttpOnly',
-    'SameSite=Lax',
+    'SameSite=None',
+    'Secure',
   ];
-  if (isProd) {
-    cookieParts.push('Secure');
+  res.append('Set-Cookie', cookieParts.join('; '));
+  clearCsrfCookie(res);
+}
+
+/**
+ * Generate a cryptographically secure CSRF token
+ */
+export function generateCsrfToken(): string {
+  return crypto.randomBytes(24).toString('hex');
+}
+
+/**
+ * Set client-accessible CSRF cookie for Double-Submit protection
+ */
+export function setCsrfCookie(res: Response, token: string): void {
+  const cookieParts = [
+    `resumex_csrf=${encodeURIComponent(token)}`,
+    'Path=/',
+    'Max-Age=604800', // 7 days
+    'SameSite=None',
+    'Secure',
+  ];
+  res.append('Set-Cookie', cookieParts.join('; '));
+}
+
+export function clearCsrfCookie(res: Response): void {
+  const cookieParts = [
+    'resumex_csrf=',
+    'Path=/',
+    'Max-Age=0',
+    'SameSite=None',
+    'Secure',
+  ];
+  res.append('Set-Cookie', cookieParts.join('; '));
+}
+
+/**
+ * Extract CSRF token from cookie header
+ */
+export function extractCsrfFromCookie(req: Request): string | null {
+  const cookieHeader = req.headers.cookie;
+  if (!cookieHeader) return null;
+  const match = cookieHeader.match(/(?:^|;\s*)resumex_csrf=([^;]+)/);
+  return match ? decodeURIComponent(match[1]).trim() : null;
+}
+
+/**
+ * CSRF Protection Middleware for state-changing requests (POST, PUT, PATCH, DELETE)
+ */
+export function csrfProtection(req: Request, res: Response, next: NextFunction): void {
+  const method = req.method.toUpperCase();
+  if (['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+    return next();
   }
-  res.setHeader('Set-Cookie', cookieParts.join('; '));
+
+  // Exempt public onboarding / entry-point routes where the user might not yet hold an ambient session
+  const exemptPaths = [
+    '/auth/login',
+    '/auth/signup',
+    '/auth/demo-login',
+    '/auth/google',
+    '/auth/forgot-password',
+    '/auth/reset-password',
+    '/auth/verify-email',
+    '/auth/csrf',
+  ];
+
+  const path = req.path;
+  if (exemptPaths.some((p) => path.endsWith(p))) {
+    return next();
+  }
+
+  // Requests explicitly authenticated via Authorization Bearer token are immune to CSRF
+  // because browsers do not attach custom Authorization headers to cross-site requests without CORS approval
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    return next();
+  }
+
+  const headerCsrf = (req.headers['x-csrf-token'] as string) || (req.headers['x-xsrf-token'] as string);
+  const cookieCsrf = extractCsrfFromCookie(req);
+
+  // If client provides CSRF token, verify it matches the cookie token
+  if (!headerCsrf || !cookieCsrf || headerCsrf !== cookieCsrf) {
+    res.status(403).json({
+      error: {
+        code: 'CSRF_VALIDATION_FAILED',
+        message: 'Invalid or missing CSRF security token. Please refresh the page and try again.',
+      },
+    });
+    return;
+  }
+
+  next();
 }
 
 /**

@@ -10,8 +10,13 @@ import {
   setAuthCookie,
   clearAuthCookie,
   hashToken,
+  generateCsrfToken,
+  setCsrfCookie,
+  csrfProtection,
   type AuthenticatedRequest,
 } from './auth';
+import { UploadSecurity } from './services/uploadSecurity';
+import { googleAuthService } from './services/googleAuth';
 import { documentParser } from './services/documentParser';
 import { resumeExtractor } from './services/resumeExtractor';
 import { atsAnalyzer } from './services/atsAnalyzer';
@@ -39,6 +44,16 @@ apiRouter.use((req: Request, res: Response, next: NextFunction) => {
   res.setHeader('X-Frame-Options', 'SAMEORIGIN');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   next();
+});
+
+// Enforce CSRF token protection on mutating methods (POST, PUT, PATCH, DELETE)
+apiRouter.use(csrfProtection);
+
+// CSRF handshake endpoint for clients
+apiRouter.get('/auth/csrf', (_req: Request, res: Response) => {
+  const token = generateCsrfToken();
+  setCsrfCookie(res, token);
+  res.json({ csrfToken: token });
 });
 
 // Multer configured with memory storage and strict 15MB limit
@@ -182,6 +197,7 @@ apiRouter.post('/auth/verify-email', authRateLimiter, async (req: Request, res: 
 
     await db.createSession(verifiedUser.id, tokenHash, ip, ua);
     setAuthCookie(res, authToken);
+    setCsrfCookie(res, generateCsrfToken());
 
     const profile = await db.getProfileByUserId(verifiedUser.id);
 
@@ -237,6 +253,7 @@ apiRouter.post('/auth/login', authRateLimiter, async (req: Request, res: Respons
 
     await db.createSession(user.id, tokenHash, ip, ua);
     setAuthCookie(res, token);
+    setCsrfCookie(res, generateCsrfToken());
 
     const profile = await db.getProfileByUserId(user.id);
 
@@ -272,6 +289,7 @@ apiRouter.post('/auth/demo-login', async (req: Request, res: Response) => {
 
     await db.createSession(demoUser.id, tokenHash, ip, ua);
     setAuthCookie(res, token);
+    setCsrfCookie(res, generateCsrfToken());
 
     const profile = await db.getProfileByUserId(demoUser.id);
 
@@ -295,8 +313,9 @@ apiRouter.post('/auth/demo-login', async (req: Request, res: Response) => {
 // Real Google OAuth / OIDC Identity Verification
 apiRouter.post('/auth/google', authRateLimiter, async (req: Request, res: Response) => {
   try {
-    const { idToken } = req.body;
-    if (!idToken || typeof idToken !== 'string') {
+    const { idToken, credential } = req.body;
+    const rawToken = idToken || credential;
+    if (!rawToken || typeof rawToken !== 'string') {
       return sendStructuredError(
         res,
         400,
@@ -305,42 +324,16 @@ apiRouter.post('/auth/google', authRateLimiter, async (req: Request, res: Respon
       );
     }
 
-    // Verify token with Google's OIDC tokeninfo endpoint
-    const googleTokenInfoUrl = `https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`;
-    const googleRes = await fetch(googleTokenInfoUrl);
-
-    if (!googleRes.ok) {
-      return sendStructuredError(
-        res,
-        401,
-        'GOOGLE_AUTH_FAILED',
-        'Google OAuth ID token verification failed or token has expired.'
-      );
-    }
-
-    const tokenPayload = (await googleRes.json()) as {
-      email?: string;
-      email_verified?: string | boolean;
-      name?: string;
-      sub?: string;
-    };
-
-    if (!tokenPayload.email) {
-      return sendStructuredError(res, 400, 'GOOGLE_EMAIL_MISSING', 'Google ID token did not contain an email address.');
-    }
-
-    const isVerified = tokenPayload.email_verified === 'true' || tokenPayload.email_verified === true;
-    if (!isVerified) {
-      return sendStructuredError(res, 403, 'GOOGLE_EMAIL_UNVERIFIED', 'Google account email is not verified.');
-    }
+    // Perform cryptographic OIDC verification using Google Auth Service
+    const validated = await googleAuthService.verifyIdToken(rawToken);
 
     const user = await db.createOrLinkGoogleUser({
-      email: tokenPayload.email,
-      name: tokenPayload.name || 'Google User',
+      email: validated.email,
+      name: validated.name || 'Google User',
     });
 
-    if (tokenPayload.sub) {
-      await db.createOrLinkOAuthAccount(user.id, 'google', tokenPayload.sub, tokenPayload.email, tokenPayload);
+    if (validated.sub) {
+      await db.createOrLinkOAuthAccount(user.id, 'google', validated.sub, validated.email, validated);
     }
 
     const token = generateToken(user);
@@ -350,6 +343,7 @@ apiRouter.post('/auth/google', authRateLimiter, async (req: Request, res: Respon
 
     await db.createSession(user.id, tokenHash, ip, ua);
     setAuthCookie(res, token);
+    setCsrfCookie(res, generateCsrfToken());
 
     const profile = await db.getProfileByUserId(user.id);
 
@@ -365,7 +359,8 @@ apiRouter.post('/auth/google', authRateLimiter, async (req: Request, res: Respon
     });
   } catch (err: unknown) {
     console.error('Google OAuth error:', err);
-    sendStructuredError(res, 500, 'GOOGLE_AUTH_ERROR', 'An error occurred while verifying Google OAuth.');
+    const msg = err instanceof Error ? err.message : 'An error occurred while verifying Google OAuth.';
+    sendStructuredError(res, 401, 'GOOGLE_AUTH_ERROR', msg);
   }
 });
 
@@ -511,6 +506,7 @@ apiRouter.get('/auth/me', requireAuth, async (req: AuthenticatedRequest, res: Re
   const user = req.user!;
   const profile = await db.getProfileByUserId(user.id);
   res.json({
+    token: req.token,
     user: {
       id: user.id,
       name: user.name,
@@ -672,6 +668,14 @@ apiRouter.post(
       if (!buffer) {
         return sendStructuredError(res, 400, 'INVALID_FILE', 'Unable to process resume file buffer.');
       }
+
+      // Strict security verification: size, extension, MIME type, and magic bytes
+      const validation = UploadSecurity.validateUpload(buffer, fileName, mimeType);
+      if (!validation.isValid) {
+        return sendStructuredError(res, 400, 'INVALID_FILE_SECURITY', validation.error || 'File security validation failed.');
+      }
+      fileName = validation.sanitizedFileName;
+      mimeType = validation.detectedMime || mimeType;
 
       // Parse document with PDF parser + OCR fallback
       const parsedResult = await documentParser.parseDocument(buffer, mimeType, fileName);

@@ -16,18 +16,54 @@ import type {
 
 class ApiClient {
   private token: string | null = null;
+  private csrfToken: string | null = null;
 
   constructor() {
-    // Clean up any legacy localStorage tokens to ensure HttpOnly cookie security compliance
     try {
-      localStorage.removeItem('resumex_auth_token');
+      this.token =
+        typeof window !== 'undefined'
+          ? sessionStorage.getItem('resumex_auth_token') || localStorage.getItem('resumex_auth_token') || null
+          : null;
     } catch {
-      // Ignore storage access errors
+      this.token = null;
     }
+  }
+
+  private getCsrfFromCookie(): string | null {
+    if (typeof document === 'undefined') return null;
+    const match = document.cookie.match(/(?:^|;\s*)resumex_csrf=([^;]+)/);
+    return match ? decodeURIComponent(match[1]) : null;
+  }
+
+  public async fetchCsrfToken(): Promise<string> {
+    try {
+      const res = await fetch('/api/auth/csrf', { credentials: 'include' });
+      if (res.ok) {
+        const data = await res.json();
+        this.csrfToken = data.csrfToken;
+        return data.csrfToken;
+      }
+    } catch {
+      // Ignore CSRF handshake error
+    }
+    return '';
   }
 
   public setToken(token: string | null) {
     this.token = token;
+    try {
+      if (typeof window !== 'undefined') {
+        if (token) {
+          sessionStorage.setItem('resumex_auth_token', token);
+          localStorage.setItem('resumex_auth_token', token);
+        } else {
+          sessionStorage.removeItem('resumex_auth_token');
+          localStorage.removeItem('resumex_auth_token');
+        }
+      }
+    } catch {
+      // Ignore storage access errors
+    }
   }
 
   public getToken(): string | null {
@@ -40,12 +76,21 @@ class ApiClient {
       headers.set('Content-Type', 'application/json');
     }
 
+    // Attach CSRF token on mutating requests
+    const method = (options.method || 'GET').toUpperCase();
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
+      const csrf = this.getCsrfFromCookie() || this.csrfToken;
+      if (csrf) {
+        headers.set('X-CSRF-Token', csrf);
+      }
+    }
+
     if (this.token) {
       headers.set('Authorization', `Bearer ${this.token}`);
     }
 
     const response = await fetch(`/api${endpoint}`, {
-      credentials: 'same-origin', // Transmits secure HttpOnly session cookies
+      credentials: 'include', // Transmits secure HttpOnly session cookies across environments
       ...options,
       headers,
     });
@@ -63,20 +108,20 @@ class ApiClient {
   }
 
   // --- Auth ---
-  public async demoLogin(): Promise<{ user: User; profile: UserProfile; token: string }> {
-    const data = await this.request<{ user: User; profile: UserProfile; token: string }>('/auth/demo-login', {
+  public async demoLogin(): Promise<{ user: User; profile: UserProfile; token?: string }> {
+    const data = await this.request<{ user: User; profile: UserProfile; token?: string }>('/auth/demo-login', {
       method: 'POST',
     });
-    this.setToken(data.token);
+    if (data.token) this.setToken(data.token);
     return data;
   }
 
-  public async login(email: string, password: string): Promise<{ user: User; profile: UserProfile; token: string }> {
-    const data = await this.request<{ user: User; profile: UserProfile; token: string }>('/auth/login', {
+  public async login(email: string, password: string): Promise<{ user: User; profile: UserProfile; token?: string }> {
+    const data = await this.request<{ user: User; profile: UserProfile; token?: string }>('/auth/login', {
       method: 'POST',
       body: JSON.stringify({ email, password }),
     });
-    this.setToken(data.token);
+    if (data.token) this.setToken(data.token);
     return data;
   }
 
@@ -109,21 +154,21 @@ class ApiClient {
     return data;
   }
 
-  public async verifyEmail(token: string): Promise<{ user: User; profile: UserProfile; token: string }> {
-    const data = await this.request<{ user: User; profile: UserProfile; token: string }>('/auth/verify-email', {
+  public async verifyEmail(token: string): Promise<{ user: User; profile: UserProfile; token?: string }> {
+    const data = await this.request<{ user: User; profile: UserProfile; token?: string }>('/auth/verify-email', {
       method: 'POST',
       body: JSON.stringify({ token }),
     });
-    this.setToken(data.token);
+    if (data.token) this.setToken(data.token);
     return data;
   }
 
-  public async googleAuth(idToken: string): Promise<{ user: User; profile: UserProfile; token: string }> {
-    const data = await this.request<{ user: User; profile: UserProfile; token: string }>('/auth/google', {
+  public async googleAuth(idToken: string): Promise<{ user: User; profile: UserProfile; token?: string }> {
+    const data = await this.request<{ user: User; profile: UserProfile; token?: string }>('/auth/google', {
       method: 'POST',
-      body: JSON.stringify({ idToken }),
+      body: JSON.stringify({ idToken, credential: idToken }),
     });
-    this.setToken(data.token);
+    if (data.token) this.setToken(data.token);
     return data;
   }
 
@@ -163,8 +208,12 @@ class ApiClient {
     });
   }
 
-  public async getMe(): Promise<{ user: User; profile: UserProfile }> {
-    return this.request<{ user: User; profile: UserProfile }>('/auth/me');
+  public async getMe(): Promise<{ user: User; profile: UserProfile; token?: string }> {
+    const data = await this.request<{ user: User; profile: UserProfile; token?: string }>('/auth/me');
+    if (data.token) {
+      this.setToken(data.token);
+    }
+    return data;
   }
 
   public async logout(): Promise<void> {

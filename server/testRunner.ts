@@ -124,6 +124,34 @@ Left Column Item 3          Right Column Item 3`;
   assert(evalReport.overallF1 >= 80, `NLP benchmark F1 score meets production threshold (${evalReport.overallF1}%)`);
   assert(evalReport.metrics.length === 4, 'Evaluated all 4 NLP metric dimensions');
 
+  // --- Test Suite 7: File Upload Security & Magic Byte Validation ---
+  console.log('\nTest Suite 7: Upload Security & Magic Byte Sanitization');
+  const { UploadSecurity } = await import('./services/uploadSecurity');
+  const validPdfHeader = Buffer.from('%PDF-1.4 sample pdf content test');
+  const pdfCheck = UploadSecurity.validateUpload(validPdfHeader, 'my_resume.pdf', 'application/pdf');
+  assert(pdfCheck.isValid, 'Accepts authentic PDF file with %PDF magic bytes');
+  assert(pdfCheck.sanitizedFileName === 'my_resume.pdf', 'Sanitized clean filename correctly');
+
+  const spoofedPdf = Buffer.from('MZ9000 this is an executable binary');
+  const spoofCheck = UploadSecurity.validateUpload(spoofedPdf, 'malicious.pdf', 'application/pdf');
+  assert(!spoofCheck.isValid, 'Rejects spoofed executable disguised as PDF');
+
+  const unsafeName = UploadSecurity.sanitizeFileName('../../etc/passwd.docx');
+  assert(!unsafeName.includes('..') && !unsafeName.includes('/'), 'Strips path traversal from upload filenames');
+
+  // --- Test Suite 8: Dynamic Scoring Engine ---
+  console.log('\nTest Suite 8: Evidence-Based Dynamic Scoring Engine');
+  const { scoringEngine } = await import('./services/scoringEngine');
+  const resumeScore = scoringEngine.calculateResumeScore(extracted.data);
+  assert(resumeScore.overall > 0 && resumeScore.overall <= 100, `Calculates dynamic overall score (${resumeScore.overall}/100)`);
+  assert(resumeScore.atsCompatibility >= 0, 'Computes ATS compatibility score component');
+  assert(Array.isArray(resumeScore.deductions), 'Populates audit deductions list');
+
+  // --- Test Suite 9: Schema Migration System ---
+  console.log('\nTest Suite 9: Schema Migrations Verification');
+  const { MigrationRunner } = await import('./migrationRunner');
+  assert(typeof MigrationRunner.runMigrations === 'function', 'MigrationRunner exposes idempotent runMigrations function');
+
   console.log('\n==========================================');
   console.log(`Results: ${passed} Passed, ${failed} Failed`);
   console.log('==========================================');

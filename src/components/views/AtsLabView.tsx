@@ -135,11 +135,23 @@ export const AtsLabView: React.FC<AtsLabViewProps> = ({
   // Group issues logically according to Requirement 17
   const safeIssues = issues || [];
   const categorizedIssues = {
-    critical: safeIssues.filter((i) => i.severity === 'high' || i.issue_type === 'missing_section'),
-    ats_warnings: safeIssues.filter((i) => i.issue_type === 'ats_column_risk' || i.issue_type === 'ats_table_risk' || i.section === 'formatting'),
-    content_impact: safeIssues.filter((i) => i.issue_type === 'bullet_passive_verb' || i.issue_type === 'bullet_weak_impact' || i.issue_type === 'missing_metric'),
-    style_consistency: safeIssues.filter((i) => i.issue_type === 'style_inconsistency' || i.issue_type === 'spelling_grammar'),
-    truth_evidence: safeIssues.filter((i) => i.issue_type === 'truth_violation' || i.issue_type === 'fabricated_metric' || i.issue_type === 'fabricated_skill'),
+    critical: safeIssues.filter((i) => i.severity === 'high' || (i.issue_type || (i as any).type) === 'missing_section'),
+    ats_warnings: safeIssues.filter((i) => {
+      const t = i.issue_type || (i as any).type;
+      return t === 'ats_column_risk' || t === 'ats_table_risk' || i.section === 'formatting';
+    }),
+    content_impact: safeIssues.filter((i) => {
+      const t = i.issue_type || (i as any).type;
+      return t === 'bullet_passive_verb' || t === 'bullet_weak_impact' || t === 'missing_metric' || t === 'weak_bullet';
+    }),
+    style_consistency: safeIssues.filter((i) => {
+      const t = i.issue_type || (i as any).type;
+      return t === 'style_inconsistency' || t === 'spelling_grammar' || t === 'overlong_sentence';
+    }),
+    truth_evidence: safeIssues.filter((i) => {
+      const t = i.issue_type || (i as any).type;
+      return t === 'truth_violation' || t === 'fabricated_metric' || t === 'fabricated_skill';
+    }),
   };
 
   const getFilteredIssues = () => {
@@ -655,7 +667,7 @@ export const AtsLabView: React.FC<AtsLabViewProps> = ({
                           {iss.severity}
                         </span>
                         <span className="font-semibold text-[#171713] capitalize">
-                          {iss.issue_type.replace('_', ' ')}
+                          {((iss.issue_type || (iss as any).type || 'issue') as string).replace(/_/g, ' ')}
                         </span>
                         <span className="text-[#6E6E63]">• Section: {iss.section}</span>
                         <span
