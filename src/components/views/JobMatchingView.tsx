@@ -289,8 +289,8 @@ export const JobMatchingView: React.FC<JobMatchingViewProps> = ({ resume, onNavi
             <strong className="text-[#171713] capitalize">{activeJob.seniorityLevel}</strong>
           </div>
           <div>
-            <span className="text-[#6E6E63]">Key Required Skills ({activeJob.requiredSkills.length}): </span>
-            <span className="text-[#171713] font-medium">{activeJob.requiredSkills.join(', ')}</span>
+            <span className="text-[#6E6E63]">Key Required Skills ({(activeJob.requiredSkills || []).length}): </span>
+            <span className="text-[#171713] font-medium">{(activeJob.requiredSkills || []).join(', ')}</span>
           </div>
         </div>
       )}
@@ -341,12 +341,12 @@ export const JobMatchingView: React.FC<JobMatchingViewProps> = ({ resume, onNavi
               <div className="flex items-center gap-2">
                 <CheckCircle2 className="w-4 h-4 text-[#4F5D2F]" />
                 <h3 className="text-sm font-bold text-[#171713] uppercase tracking-wider">
-                  Matched Skills & Document Evidence ({matchResult.matchedSkills.length})
+                  Matched Skills & Document Evidence ({(matchResult.matchedSkills || []).length})
                 </h3>
               </div>
 
               <div className="space-y-2.5 max-h-96 overflow-y-auto pr-1">
-                {matchResult.matchedSkills.map((m, idx) => (
+                {(matchResult.matchedSkills || []).map((m, idx) => (
                   <div
                     key={idx}
                     className="p-3 rounded-lg bg-[#FAF9F5] border border-[#EAE8E1] text-xs space-y-1"
@@ -370,17 +370,17 @@ export const JobMatchingView: React.FC<JobMatchingViewProps> = ({ resume, onNavi
               <div className="flex items-center gap-2">
                 <AlertCircle className="w-4 h-4 text-[#C49A3A]" />
                 <h3 className="text-sm font-bold text-[#171713] uppercase tracking-wider">
-                  Missing Skills & Gaps ({matchResult.missingSkills.length})
+                  Missing Skills & Gaps ({(matchResult.missingSkills || []).length})
                 </h3>
               </div>
 
               <div className="space-y-2 max-h-96 overflow-y-auto pr-1">
-                {matchResult.missingSkills.length === 0 ? (
+                {(matchResult.missingSkills || []).length === 0 ? (
                   <div className="text-xs text-[#4F5D2F] p-4 bg-[#4F5D2F]/10 rounded-lg border border-[#4F5D2F]/20 font-semibold">
                     100% of target job skill requirements are present in your resume!
                   </div>
                 ) : (
-                  matchResult.missingSkills.map((m, idx) => (
+                  (matchResult.missingSkills || []).map((m, idx) => (
                     <div
                       key={idx}
                       className="p-3 rounded-lg bg-[#FAF9F5] border border-[#EAE8E1] flex items-center justify-between text-xs"

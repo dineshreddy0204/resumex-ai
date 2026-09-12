@@ -159,7 +159,7 @@ export const MyResumesView: React.FC<MyResumesViewProps> = ({
                       {resume.data?.experience?.length || 0} Experiences
                     </span>
                     <span className="px-2 py-0.5 rounded bg-[#FAF9F5] border border-[#EAE8E1]">
-                      {resume.data?.skills?.reduce((acc, g) => acc + g.items.length, 0) || 0} Skills
+                      {resume.data?.skills?.reduce((acc, g) => acc + (g.items?.length || 0), 0) || 0} Skills
                     </span>
                   </div>
                 </div>

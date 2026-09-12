@@ -120,7 +120,7 @@ export const ScoreRadar: React.FC<ScoreRadarProps> = ({ score, compact = false }
           <div className="flex items-center gap-2 mb-3">
             <TrendingDown className="w-4 h-4 text-[#C49A3A]" />
             <h4 className="text-xs font-bold text-[#171713] uppercase tracking-wider">
-              Diagnostic Deductions & Root Causes ({safeScore.deductions.length})
+              Diagnostic Deductions & Root Causes ({safeScore.deductions?.length || 0})
             </h4>
           </div>
           <div className="space-y-2.5">

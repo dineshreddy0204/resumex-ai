@@ -45,7 +45,7 @@ export class ScoringEngine {
     const atsCompatibility = atsResult.overallAtsScore;
 
     // 2. Skills Dimension Score
-    const totalSkills = resumeData.skills.reduce((sum, g) => sum + g.items.length, 0);
+    const totalSkills = (resumeData.skills || []).reduce((sum, g) => sum + (g.items?.length || 0), 0);
     let skillsScore = Math.min(98, Math.max(30, 45 + totalSkills * 2.8));
     if (totalSkills < 6) {
       skillsScore = 55;
@@ -59,7 +59,8 @@ export class ScoringEngine {
 
     // 3. Experience Dimension Score
     let experienceScore = 50;
-    if (resumeData.experience.length === 0) {
+    const experienceList = resumeData.experience || [];
+    if (experienceList.length === 0) {
       experienceScore = 20;
       deductions.push({
         category: 'Experience',
@@ -72,8 +73,8 @@ export class ScoringEngine {
       let strongVerbCount = 0;
       let quantifiedCount = 0;
 
-      for (const exp of resumeData.experience) {
-        for (const bullet of exp.bullets) {
+      for (const exp of experienceList) {
+        for (const bullet of exp.bullets || []) {
           bulletCount++;
           const evaluation = achievementAnalyzer.analyzeBullet(bullet, 'experience');
           if (evaluation.hasStrongActionVerb) strongVerbCount++;
@@ -86,7 +87,7 @@ export class ScoringEngine {
 
       experienceScore = Math.round(
         60 +
-          Math.min(20, resumeData.experience.length * 7) +
+          Math.min(20, experienceList.length * 7) +
           Math.min(15, verbRatio * 20) +
           Math.min(15, quantRatio * 20)
       );
@@ -137,8 +138,8 @@ export class ScoringEngine {
     let grammarScore = 95;
     // Check for common passive patterns
     let passiveCount = 0;
-    for (const exp of resumeData.experience) {
-      for (const b of exp.bullets) {
+    for (const exp of experienceList) {
+      for (const b of exp.bullets || []) {
         if (/was responsible for|were involved in|helped with/i.test(b)) {
           passiveCount++;
         }
@@ -162,11 +163,12 @@ export class ScoringEngine {
 
     // 9. Readability Score (Flesch-Kincaid & sentence length estimate)
     let readabilityScore = 90;
+    const totalExpBullets = experienceList.reduce((sum, exp) => sum + (exp.bullets?.length || 0), 0);
     const avgWordsPerBullet =
-      resumeData.experience.reduce(
-        (sum, exp) => sum + exp.bullets.reduce((bSum, b) => bSum + b.split(/\s+/).length, 0),
+      experienceList.reduce(
+        (sum, exp) => sum + (exp.bullets || []).reduce((bSum, b) => bSum + b.split(/\s+/).length, 0),
         0
-      ) / Math.max(1, resumeData.experience.reduce((sum, exp) => sum + exp.bullets.length, 0));
+      ) / Math.max(1, totalExpBullets);
 
     if (avgWordsPerBullet > 30) {
       readabilityScore -= 8;

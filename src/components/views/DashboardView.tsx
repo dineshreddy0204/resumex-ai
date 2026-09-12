@@ -265,18 +265,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             <div className="p-5 rounded-xl bg-white border border-[#EAE8E1] shadow-xs">
               <div className="text-xs font-medium text-[#6E6E63]">Indexed Skills</div>
               <div className="text-2xl font-bold text-[#171713] mt-1">
-                {activeResume.data.skills.reduce((s, g) => s + g.items.length, 0)}
+                {(activeResume.data?.skills || []).reduce((s, g) => s + (g.items?.length || 0), 0)}
               </div>
               <p className="text-[11px] text-[#6E6E63] mt-1">
-                Categorized across {activeResume.data.skills.length} technical domains.
+                Categorized across {activeResume.data?.skills?.length || 0} technical domains.
               </p>
             </div>
 
             <div className="p-5 rounded-xl bg-white border border-[#EAE8E1] shadow-xs">
               <div className="text-xs font-medium text-[#6E6E63]">Diagnosed Issues</div>
-              <div className="text-2xl font-bold text-[#8E6D24] mt-1">{issues.length}</div>
+              <div className="text-2xl font-bold text-[#8E6D24] mt-1">{(issues || []).length}</div>
               <p className="text-[11px] text-[#6E6E63] mt-1">
-                {issues.filter((i) => i.severity === 'high').length} high-impact recommendations pending review.
+                {(issues || []).filter((i) => i.severity === 'high').length} high-impact recommendations pending review.
               </p>
             </div>
           </div>
@@ -289,7 +289,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           <div className="flex items-center gap-2">
             <FileText className="w-4 h-4 text-[#4F5D2F]" />
             <h3 className="text-sm font-bold text-[#171713] uppercase tracking-wider">
-              Your Resumes ({resumes.length})
+              Your Resumes ({(resumes || []).length})
             </h3>
           </div>
           <button

@@ -242,7 +242,7 @@ export const CareerGapView: React.FC<CareerGapViewProps> = ({ resume, onNavigate
             <div className="p-5 rounded-xl bg-white border border-[#EAE8E1] shadow-xs">
               <div className="text-xs font-medium text-[#6E6E63]">Strong Proven Competencies</div>
               <div className="text-2xl font-bold text-[#4F5D2F] mt-1">
-                {gapAnalysis.strongSkills.length} skills
+                {(gapAnalysis.strongSkills || []).length} skills
               </div>
               <div className="text-[11px] text-[#6E6E63] mt-1">Backed by multi-bullet project proof</div>
             </div>
@@ -250,7 +250,7 @@ export const CareerGapView: React.FC<CareerGapViewProps> = ({ resume, onNavigate
             <div className="p-5 rounded-xl bg-white border border-[#EAE8E1] shadow-xs">
               <div className="text-xs font-medium text-[#6E6E63]">Developing (Evidence Gaps)</div>
               <div className="text-2xl font-bold text-[#8E6D24] mt-1">
-                {gapAnalysis.developingSkills.length} skills
+                {(gapAnalysis.developingSkills || []).length} skills
               </div>
               <div className="text-[11px] text-[#6E6E63] mt-1">Listed but lacking measurable delivery</div>
             </div>
@@ -258,7 +258,7 @@ export const CareerGapView: React.FC<CareerGapViewProps> = ({ resume, onNavigate
             <div className="p-5 rounded-xl bg-white border border-[#EAE8E1] shadow-xs">
               <div className="text-xs font-medium text-[#6E6E63]">Missing Benchmark Skills</div>
               <div className="text-2xl font-bold text-rose-700 mt-1">
-                {gapAnalysis.missingSkills.length} skills
+                {(gapAnalysis.missingSkills || []).length} skills
               </div>
               <div className="text-[11px] text-[#6E6E63] mt-1">Core requirements for target role</div>
             </div>

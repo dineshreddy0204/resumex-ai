@@ -308,11 +308,11 @@ export const VersionComparisonView: React.FC<VersionComparisonViewProps> = ({
                 <div><strong>Summary:</strong> {verA?.resumeData?.summary}</div>
                 <div>
                   <strong>Experience Bullet Count:</strong>{' '}
-                  {verA?.resumeData?.experience?.reduce((acc: number, e: any) => acc + e.bullets.length, 0)}
+                  {(verA?.resumeData?.experience || []).reduce((acc: number, e: any) => acc + (e.bullets?.length || 0), 0)}
                 </div>
                 <div>
                   <strong>Skill Count:</strong>{' '}
-                  {verA?.resumeData?.skills?.reduce((acc: number, s: any) => acc + s.items.length, 0)}
+                  {(verA?.resumeData?.skills || []).reduce((acc: number, s: any) => acc + (s.items?.length || 0), 0)}
                 </div>
               </div>
             </div>
@@ -337,11 +337,11 @@ export const VersionComparisonView: React.FC<VersionComparisonViewProps> = ({
                 <div><strong>Summary:</strong> {verB?.resumeData?.summary}</div>
                 <div>
                   <strong>Experience Bullet Count:</strong>{' '}
-                  {verB?.resumeData?.experience?.reduce((acc: number, e: any) => acc + e.bullets.length, 0)}
+                  {(verB?.resumeData?.experience || []).reduce((acc: number, e: any) => acc + (e.bullets?.length || 0), 0)}
                 </div>
                 <div>
                   <strong>Skill Count:</strong>{' '}
-                  {verB?.resumeData?.skills?.reduce((acc: number, s: any) => acc + s.items.length, 0)}
+                  {(verB?.resumeData?.skills || []).reduce((acc: number, s: any) => acc + (s.items?.length || 0), 0)}
                 </div>
               </div>
             </div>

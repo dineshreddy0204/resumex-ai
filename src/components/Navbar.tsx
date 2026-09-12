@@ -156,10 +156,10 @@ export const Navbar: React.FC<NavbarProps> = ({
               {resumeDropdownOpen && (
                 <div className="absolute left-0 top-full mt-1.5 w-full bg-white rounded-xl border border-[#EAE8E1] shadow-lg py-1.5 z-50 animate-in fade-in zoom-in-95 duration-100">
                   <div className="px-3 py-1.5 text-[11px] font-semibold text-[#6E6E63] uppercase tracking-wider border-b border-[#EAE8E1]">
-                    Candidate Documents ({resumes.length})
+                    Candidate Documents ({(resumes || []).length})
                   </div>
                   <div className="max-h-56 overflow-y-auto py-1">
-                    {resumes.map((r) => (
+                    {(resumes || []).map((r) => (
                       <button
                         key={r.id}
                         id={`select-resume-${r.id}`}

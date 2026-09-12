@@ -133,12 +133,13 @@ export const AtsLabView: React.FC<AtsLabViewProps> = ({
   const currentProfile = simulationProfiles[simulationMode];
 
   // Group issues logically according to Requirement 17
+  const safeIssues = issues || [];
   const categorizedIssues = {
-    critical: issues.filter((i) => i.severity === 'high' || i.issue_type === 'missing_section'),
-    ats_warnings: issues.filter((i) => i.issue_type === 'ats_column_risk' || i.issue_type === 'ats_table_risk' || i.section === 'formatting'),
-    content_impact: issues.filter((i) => i.issue_type === 'bullet_passive_verb' || i.issue_type === 'bullet_weak_impact' || i.issue_type === 'missing_metric'),
-    style_consistency: issues.filter((i) => i.issue_type === 'style_inconsistency' || i.issue_type === 'spelling_grammar'),
-    truth_evidence: issues.filter((i) => i.issue_type === 'truth_violation' || i.issue_type === 'fabricated_metric' || i.issue_type === 'fabricated_skill'),
+    critical: safeIssues.filter((i) => i.severity === 'high' || i.issue_type === 'missing_section'),
+    ats_warnings: safeIssues.filter((i) => i.issue_type === 'ats_column_risk' || i.issue_type === 'ats_table_risk' || i.section === 'formatting'),
+    content_impact: safeIssues.filter((i) => i.issue_type === 'bullet_passive_verb' || i.issue_type === 'bullet_weak_impact' || i.issue_type === 'missing_metric'),
+    style_consistency: safeIssues.filter((i) => i.issue_type === 'style_inconsistency' || i.issue_type === 'spelling_grammar'),
+    truth_evidence: safeIssues.filter((i) => i.issue_type === 'truth_violation' || i.issue_type === 'fabricated_metric' || i.issue_type === 'fabricated_skill'),
   };
 
   const getFilteredIssues = () => {
@@ -154,7 +155,7 @@ export const AtsLabView: React.FC<AtsLabViewProps> = ({
       case 'truth_evidence':
         return categorizedIssues.truth_evidence;
       default:
-        return issues;
+        return safeIssues;
     }
   };
 
@@ -371,16 +372,16 @@ export const AtsLabView: React.FC<AtsLabViewProps> = ({
 
                   <div className="space-y-1.5 text-[11px]">
                     <div className="text-[10px] font-bold uppercase text-[#6E6E63]">Parser Strengths</div>
-                    {sim.strengths.slice(0, 2).map((str, sIdx) => (
+                    {(sim.strengths || []).slice(0, 2).map((str, sIdx) => (
                       <div key={sIdx} className="flex items-start gap-1.5 text-[#4F5D2F]">
                         <CheckCircle2 className="w-3.5 h-3.5 mt-0.5 shrink-0" />
                         <span className="line-clamp-1">{str}</span>
                       </div>
                     ))}
-                    {sim.weaknesses.length > 0 && (
+                    {(sim.weaknesses || []).length > 0 && (
                       <>
                         <div className="text-[10px] font-bold uppercase text-[#6E6E63] pt-1">Flagged Items</div>
-                        {sim.weaknesses.slice(0, 2).map((wk, wIdx) => (
+                        {(sim.weaknesses || []).slice(0, 2).map((wk, wIdx) => (
                           <div key={wIdx} className="flex items-start gap-1.5 text-[#C49A3A]">
                             <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
                             <span className="line-clamp-1">{wk}</span>
@@ -546,7 +547,7 @@ export const AtsLabView: React.FC<AtsLabViewProps> = ({
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
             <h3 className="text-sm font-bold text-[#171713] uppercase tracking-wider">
-              Categorized Issue Management ({issues.length})
+              Categorized Issue Management ({safeIssues.length})
             </h3>
             <p className="text-xs text-[#6E6E63] mt-0.5">
               Review and resolve diagnosed issues with truth safeguards and batch operations.
@@ -596,7 +597,7 @@ export const AtsLabView: React.FC<AtsLabViewProps> = ({
         {/* Issue Category Filter Pills */}
         <div className="flex items-center gap-2 flex-wrap pt-1 border-b border-[#EAE8E1] pb-3">
           {[
-            { id: 'all', label: `All Issues (${issues.length})` },
+            { id: 'all', label: `All Issues (${safeIssues.length})` },
             { id: 'critical', label: `Critical Blockers (${categorizedIssues.critical.length})` },
             { id: 'ats_warnings', label: `ATS Warnings (${categorizedIssues.ats_warnings.length})` },
             { id: 'content_impact', label: `Content & Impact (${categorizedIssues.content_impact.length})` },

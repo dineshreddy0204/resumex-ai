@@ -464,7 +464,7 @@ export const LiveBuilderView: React.FC<LiveBuilderViewProps> = ({
   };
 
   // Approximate content density / page budget calculation
-  const totalBullets = formData.experience.reduce((acc, e) => acc + e.bullets.length, 0);
+  const totalBullets = (formData.experience || []).reduce((acc, e) => acc + (e.bullets?.length || 0), 0);
   const totalWords = (formData.summary?.split(/\s+/).length || 0) + totalBullets * 18;
   const pageCapacity = Math.min(100, Math.round((totalWords / 450) * 100));
 
@@ -837,7 +837,7 @@ export const LiveBuilderView: React.FC<LiveBuilderViewProps> = ({
                 onClick={() => toggleSection('experience')}
               >
                 <h3 className="text-xs font-bold text-[#171713] uppercase tracking-wider">
-                  Work Experience ({formData.experience.length})
+                  Work Experience ({(formData.experience || []).length})
                 </h3>
                 {collapsedSections.experience ? (
                   <ChevronDown className="w-4 h-4 text-[#6E6E63]" />
@@ -856,7 +856,7 @@ export const LiveBuilderView: React.FC<LiveBuilderViewProps> = ({
 
             {!collapsedSections.experience && (
               <div className="space-y-4">
-                {formData.experience.map((exp, expIdx) => (
+                {(formData.experience || []).map((exp, expIdx) => (
                   <div key={exp.id} className="p-4 rounded-lg bg-[#FAF9F5] border border-[#EAE8E1] space-y-3">
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
                       <div className="sm:col-span-2">
@@ -914,7 +914,7 @@ export const LiveBuilderView: React.FC<LiveBuilderViewProps> = ({
                         </button>
                       </div>
 
-                      {exp.bullets.map((bullet, bIdx) => (
+                      {(exp.bullets || []).map((bullet, bIdx) => (
                         <div key={bIdx} className="flex items-start gap-2">
                           <textarea
                             rows={2}
@@ -934,7 +934,7 @@ export const LiveBuilderView: React.FC<LiveBuilderViewProps> = ({
                             >
                               <Sparkles className="w-3.5 h-3.5 text-[#C49A3A]" />
                             </button>
-                            {exp.bullets.length > 1 && (
+                            {(exp.bullets || []).length > 1 && (
                               <button
                                 onClick={() => handleRemoveBullet(expIdx, bIdx)}
                                 className="p-1 rounded text-[#6E6E63] hover:text-rose-600 hover:bg-rose-50 transition"

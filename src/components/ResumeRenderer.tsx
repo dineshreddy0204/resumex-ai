@@ -156,7 +156,7 @@ export const ResumeRenderer: React.FC<ResumeRendererProps> = ({
                   {skills.map((group, idx) => (
                     <div key={idx}>
                       <span className="font-semibold text-slate-800">{group.category}: </span>
-                      <span className="text-slate-600">{group.items.join(', ')}</span>
+                      <span className="text-slate-600">{(group.items || []).join(', ')}</span>
                     </div>
                   ))}
                 </div>
@@ -231,7 +231,7 @@ export const ResumeRenderer: React.FC<ResumeRendererProps> = ({
                       </div>
                       <div className="text-xs text-slate-600 font-medium mb-1">{exp.company}</div>
                       <ul className="space-y-1 text-xs text-slate-700">
-                        {exp.bullets.map((bullet, bIdx) => (
+                        {(exp.bullets || []).map((bullet, bIdx) => (
                           <li key={bIdx} className="flex items-start gap-1.5">
                             <span className="text-slate-400 select-none">{bulletSymbol}</span>
                             <span className="leading-snug">{bullet}</span>
@@ -267,7 +267,7 @@ export const ResumeRenderer: React.FC<ResumeRendererProps> = ({
                         </div>
                       )}
                       <ul className="space-y-1 text-xs text-slate-700">
-                        {proj.bullets.map((bullet, bIdx) => (
+                        {(proj.bullets || []).map((bullet, bIdx) => (
                           <li key={bIdx} className="flex items-start gap-1.5">
                             <span className="text-slate-400 select-none">{bulletSymbol}</span>
                             <span className="leading-snug">{bullet}</span>
@@ -304,7 +304,7 @@ export const ResumeRenderer: React.FC<ResumeRendererProps> = ({
                 {skills.map((group, idx) => (
                   <div key={idx}>
                     <span className="font-semibold text-slate-900">{group.category}: </span>
-                    <span className="text-slate-700">{group.items.join(', ')}</span>
+                    <span className="text-slate-700">{(group.items || []).join(', ')}</span>
                   </div>
                 ))}
               </div>
@@ -330,7 +330,7 @@ export const ResumeRenderer: React.FC<ResumeRendererProps> = ({
                     </div>
                     {exp.location && <div className="text-[11px] text-slate-500 mb-1">{exp.location}</div>}
                     <ul className="space-y-1.5 mt-1 text-xs text-slate-700">
-                      {exp.bullets.map((bullet, bIdx) => (
+                      {(exp.bullets || []).map((bullet, bIdx) => (
                         <li key={bIdx} className="flex items-start gap-2">
                           <span className="text-slate-400 select-none font-bold">{bulletSymbol}</span>
                           <span className="leading-snug">{bullet}</span>
@@ -371,7 +371,7 @@ export const ResumeRenderer: React.FC<ResumeRendererProps> = ({
                       )}
                     </div>
                     <ul className="space-y-1 mt-1 text-xs text-slate-700">
-                      {proj.bullets.map((bullet, bIdx) => (
+                      {(proj.bullets || []).map((bullet, bIdx) => (
                         <li key={bIdx} className="flex items-start gap-2">
                           <span className="text-slate-400 select-none font-bold">{bulletSymbol}</span>
                           <span className="leading-snug">{bullet}</span>
