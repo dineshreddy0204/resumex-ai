@@ -1360,6 +1360,43 @@ export class DatabaseEngine {
     };
   }
 
+  public async restoreVersion(userId: string, resumeId: string, versionId: string): Promise<StoredResume> {
+    await this.ensureInitialized();
+    await this.getResume(userId, resumeId); // Verify ownership
+
+    const vRes = await this.pgPool.query(
+      `SELECT resume_data_json, version_name
+       FROM resume_versions
+       WHERE id = $1 AND resume_id = $2 AND user_id = $3`,
+      [versionId, resumeId, userId]
+    );
+
+    if (vRes.rows.length === 0) {
+      throw new Error(`Version ${versionId} not found.`);
+    }
+
+    const versionData: ResumeData = vRes.rows[0].resume_data_json;
+    const versionName: string = vRes.rows[0].version_name;
+
+    const restoredResume = await this.updateResumeData(
+      userId,
+      resumeId,
+      versionData
+    );
+
+    await this.pgPool.query(
+      `UPDATE resumes SET current_version_id = $1, updated_at = NOW() WHERE id = $2 AND user_id = $3`,
+      [versionId, resumeId, userId]
+    );
+
+    await this.logAudit(userId, 'VERSION_RESTORED', 'Resume', resumeId, {
+      versionId,
+      versionName,
+    });
+
+    return restoredResume;
+  }
+
   // --- ISSUES & SUGGESTIONS ---
   public async getIssues(userId: string, resumeId: string): Promise<AnalysisIssue[]> {
     await this.ensureInitialized();

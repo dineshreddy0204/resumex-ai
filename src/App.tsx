@@ -566,6 +566,11 @@ export default function App() {
             <VersionComparisonView
               resume={activeResume}
               onNavigate={(tab) => setActiveTab(tab as NavTab)}
+              onRestoreVersion={async (restored) => {
+                await handleSelectResume(restored);
+                await refreshResumes();
+                showToast('success', `Restored resume to version state.`);
+              }}
             />
           )}
 

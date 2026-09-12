@@ -312,6 +312,31 @@ class ApiClient {
     });
   }
 
+  public async batchActionIssues(
+    resumeId: string,
+    issueIds: string[],
+    action: 'accepted' | 'rejected'
+  ): Promise<{ success: boolean; updatedCount: number; issues: AnalysisIssue[] }> {
+    return this.request(`/resumes/${id(resumeId)}/issues/batch-action`, {
+      method: 'POST',
+      body: JSON.stringify({ issueIds, action }),
+    });
+  }
+
+  public async fixSafeIssues(
+    resumeId: string
+  ): Promise<{
+    success: boolean;
+    fixedCount: number;
+    skippedRiskyCount: number;
+    message: string;
+    resume: ResumeDocument;
+  }> {
+    return this.request(`/resumes/${id(resumeId)}/issues/fix-safe`, {
+      method: 'POST',
+    });
+  }
+
   // --- Versions ---
   public async getVersions(resumeId: string): Promise<ResumeVersion[]> {
     const res = await this.request<{ versions: ResumeVersion[] }>(`/resumes/${id(resumeId)}/versions`);
@@ -339,6 +364,15 @@ class ApiClient {
     return this.request(`/resumes/${id(resumeId)}/versions/compare`, {
       method: 'POST',
       body: JSON.stringify({ versionAId, versionBId, targetJobId }),
+    });
+  }
+
+  public async restoreVersion(
+    resumeId: string,
+    versionId: string
+  ): Promise<{ success: boolean; message: string; resume: ResumeDocument }> {
+    return this.request(`/resumes/${id(resumeId)}/versions/${id(versionId)}/restore`, {
+      method: 'POST',
     });
   }
 

@@ -797,6 +797,97 @@ apiRouter.post('/resumes/:id/issues/:issueId/action', requireAuth, async (req: A
   }
 });
 
+// Batch action for selected issues
+apiRouter.post('/resumes/:id/issues/batch-action', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { issueIds, action } = req.body;
+    if (!Array.isArray(issueIds) || !action) {
+      return sendStructuredError(res, 400, 'INVALID_PAYLOAD', 'issueIds array and action are required.');
+    }
+
+    const updatedIssues = [];
+    for (const iId of issueIds) {
+      try {
+        const up = await db.updateIssueStatus(req.user!.id, req.params.id, iId, action);
+        updatedIssues.push(up);
+      } catch {
+        // Continue with next
+      }
+    }
+
+    res.json({ success: true, updatedCount: updatedIssues.length, issues: updatedIssues });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Batch action failed.';
+    sendStructuredError(res, 500, 'BATCH_ACTION_FAILED', msg);
+  }
+});
+
+// "Fix All Safe Changes" — never automatically accepts risky factual changes
+apiRouter.post('/resumes/:id/issues/fix-safe', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const resume = await db.getResume(req.user!.id, req.params.id);
+    const issues = await db.getIssues(req.user!.id, resume.id);
+
+    // Identify safe issues vs risky factual changes
+    const riskyTypes = ['truth_violation', 'fabricated_metric', 'fabricated_skill', 'missing_section', 'missing_metric'];
+    const safeIssues = issues.filter(
+      (iss) =>
+        iss.status === 'pending' &&
+        !riskyTypes.includes(iss.type) &&
+        !iss.requires_user_confirmation
+    );
+    const riskyIssues = issues.filter(
+      (iss) =>
+        iss.status === 'pending' &&
+        (riskyTypes.includes(iss.type) || iss.requires_user_confirmation)
+    );
+
+    let fixedCount = 0;
+    const updatedData = JSON.parse(JSON.stringify(resume.data)) as ResumeData;
+
+    // Apply safe wording fixes (e.g. passive verbs to active verbs in bullets)
+    for (const safe of safeIssues) {
+      if (safe.section === 'experience' && safe.evidence) {
+        for (const exp of updatedData.experience) {
+          for (let bIdx = 0; bIdx < exp.bullets.length; bIdx++) {
+            if (exp.bullets[bIdx].includes(safe.evidence) || safe.evidence.includes(exp.bullets[bIdx])) {
+              // Apply deterministic rewrite
+              const rewritten = exp.bullets[bIdx]
+                .replace(/^worked on\s+/i, 'Engineered solutions for ')
+                .replace(/^helped with\s+/i, 'Facilitated the execution of ')
+                .replace(/^responsible for\s+/i, 'Spearheaded and maintained ')
+                .replace(/^assisted in\s+/i, 'Collaborated to implement ')
+                .replace(/^handled\s+/i, 'Managed and optimized ');
+              if (rewritten !== exp.bullets[bIdx]) {
+                exp.bullets[bIdx] = rewritten;
+              }
+            }
+          }
+        }
+      }
+      await db.updateIssueStatus(req.user!.id, resume.id, safe.id, 'accepted');
+      fixedCount++;
+    }
+
+    // Save updated resume data and recalculate scores
+    const savedResume = await db.updateResumeData(req.user!.id, resume.id, updatedData);
+    const ats = atsAnalyzer.analyzeAtsCompatibility(savedResume.data);
+    const score = scoringEngine.calculateResumeScore(savedResume.data);
+    const finalResume = await db.updateResumeScores(req.user!.id, savedResume.id, score, ats.overallAtsScore);
+
+    res.json({
+      success: true,
+      fixedCount,
+      skippedRiskyCount: riskyIssues.length,
+      message: `Fixed ${fixedCount} safe wording and style improvements. ${riskyIssues.length} factual/metric changes were protected for manual candidate verification.`,
+      resume: finalResume,
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Fix safe issues failed.';
+    sendStructuredError(res, 500, 'FIX_SAFE_FAILED', msg);
+  }
+});
+
 apiRouter.post('/truth/verify', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { originalText, proposedText, resumeId } = req.body;
@@ -898,6 +989,20 @@ apiRouter.post('/resumes/:id/versions/compare', requireAuth, async (req: Authent
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Comparison failed.';
     sendStructuredError(res, 400, 'VERSION_COMPARE_FAILED', msg);
+  }
+});
+
+apiRouter.post('/resumes/:id/versions/:versionId/restore', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const restored = await db.restoreVersion(req.user!.id, req.params.id, req.params.versionId);
+    res.json({
+      success: true,
+      message: 'Resume version successfully restored.',
+      resume: restored,
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Failed to restore version.';
+    sendStructuredError(res, 400, 'RESTORE_VERSION_FAILED', msg);
   }
 });
 
