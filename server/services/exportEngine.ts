@@ -1,5 +1,15 @@
 import type { ResumeData } from '../types';
 import { atsAnalyzer } from './atsAnalyzer';
+import { MASTER_TEMPLATES } from './templateEngine';
+import {
+  Document,
+  Packer,
+  Paragraph,
+  TextRun,
+  HeadingLevel,
+  AlignmentType,
+  BorderStyle,
+} from 'docx';
 
 export interface PreExportValidation {
   isValid: boolean;
@@ -197,6 +207,364 @@ export class ExportEngine {
     }
 
     return lines.join('\n');
+  }
+
+  /**
+   * Generates a fully-styled, professional Word Document (.docx) matching
+   * the user's selected resume template typography, colors, and layout structure.
+   */
+  public async generateDocx(data: ResumeData, templateId: string = 'ats-classic'): Promise<Buffer> {
+    const template = MASTER_TEMPLATES.find((t) => t.id === templateId) || MASTER_TEMPLATES[0];
+
+    // Clean hex colors (remove '#' if present)
+    const primaryHex = (template.primaryColor || '#0f172a').replace('#', '');
+    const secondaryHex = (template.secondaryColor || '#475569').replace('#', '');
+    const accentHex = (template.accentColor || '#0284c7').replace('#', '');
+
+    const children: Paragraph[] = [];
+
+    // 1. Candidate Name (Header)
+    children.push(
+      new Paragraph({
+        alignment: template.headerStyle === 'centered' ? AlignmentType.CENTER : AlignmentType.LEFT,
+        spacing: { before: 0, after: 120 },
+        children: [
+          new TextRun({
+            text: data.personal_info?.name || 'Candidate Name',
+            bold: true,
+            size: 36, // 18pt
+            color: primaryHex,
+          }),
+        ],
+      })
+    );
+
+    // 2. Contact Information Block
+    const contactParts: string[] = [];
+    if (data.personal_info?.email) contactParts.push(data.personal_info.email);
+    if (data.personal_info?.phone) contactParts.push(data.personal_info.phone);
+    if (data.personal_info?.location) contactParts.push(data.personal_info.location);
+    if (data.personal_info?.linkedin) contactParts.push(data.personal_info.linkedin);
+    if (data.personal_info?.github) contactParts.push(data.personal_info.github);
+    if (data.personal_info?.portfolio) contactParts.push(data.personal_info.portfolio);
+
+    if (contactParts.length > 0) {
+      children.push(
+        new Paragraph({
+          alignment: template.headerStyle === 'centered' ? AlignmentType.CENTER : AlignmentType.LEFT,
+          spacing: { after: 240 },
+          children: [
+            new TextRun({
+              text: contactParts.join('  •  '),
+              size: 20, // 10pt
+              color: secondaryHex,
+            }),
+          ],
+        })
+      );
+    }
+
+    const createSectionHeader = (title: string): Paragraph => {
+      return new Paragraph({
+        heading: HeadingLevel.HEADING_2,
+        spacing: { before: 240, after: 120 },
+        border: {
+          bottom: {
+            color: accentHex,
+            space: 4,
+            style: BorderStyle.SINGLE,
+            size: 8,
+          },
+        },
+        children: [
+          new TextRun({
+            text: title.toUpperCase(),
+            bold: true,
+            size: 22, // 11pt
+            color: primaryHex,
+          }),
+        ],
+      });
+    };
+
+    // 3. Professional Summary
+    if (data.summary && data.summary.trim()) {
+      children.push(createSectionHeader('Professional Summary'));
+      children.push(
+        new Paragraph({
+          spacing: { after: 160 },
+          children: [
+            new TextRun({
+              text: data.summary,
+              size: 21,
+              color: '1e293b',
+            }),
+          ],
+        })
+      );
+    }
+
+    // 4. Technical Skills
+    if (data.skills && data.skills.length > 0) {
+      children.push(createSectionHeader('Skills & Competencies'));
+      for (const skillGroup of data.skills) {
+        if (skillGroup.items && skillGroup.items.length > 0) {
+          children.push(
+            new Paragraph({
+              spacing: { after: 80 },
+              children: [
+                new TextRun({
+                  text: `${skillGroup.category}: `,
+                  bold: true,
+                  size: 21,
+                  color: primaryHex,
+                }),
+                new TextRun({
+                  text: skillGroup.items.join(', '),
+                  size: 21,
+                  color: '334155',
+                }),
+              ],
+            })
+          );
+        }
+      }
+    }
+
+    // 5. Work Experience
+    if (data.experience && data.experience.length > 0) {
+      children.push(createSectionHeader('Work Experience'));
+      for (const exp of data.experience) {
+        const titleLineParts: string[] = [];
+        if (exp.role) titleLineParts.push(exp.role);
+        if (exp.company) titleLineParts.push(exp.company);
+        const dateRange = [exp.startDate, exp.endDate].filter(Boolean).join(' – ');
+
+        children.push(
+          new Paragraph({
+            spacing: { before: 140, after: 60 },
+            children: [
+              new TextRun({
+                text: exp.role || 'Role',
+                bold: true,
+                size: 22,
+                color: primaryHex,
+              }),
+              new TextRun({
+                text: exp.company ? `  |  ${exp.company}` : '',
+                bold: true,
+                size: 21,
+                color: secondaryHex,
+              }),
+              new TextRun({
+                text: dateRange ? ` (${dateRange})` : '',
+                italics: true,
+                size: 20,
+                color: secondaryHex,
+              }),
+            ],
+          })
+        );
+
+        if (exp.location) {
+          children.push(
+            new Paragraph({
+              spacing: { after: 80 },
+              children: [
+                new TextRun({
+                  text: exp.location,
+                  italics: true,
+                  size: 19,
+                  color: secondaryHex,
+                }),
+              ],
+            })
+          );
+        }
+
+        for (const bullet of exp.bullets || []) {
+          children.push(
+            new Paragraph({
+              bullet: { level: 0 },
+              spacing: { after: 60 },
+              children: [
+                new TextRun({
+                  text: bullet,
+                  size: 20,
+                  color: '1e293b',
+                }),
+              ],
+            })
+          );
+        }
+      }
+    }
+
+    // 6. Projects
+    if (data.projects && data.projects.length > 0) {
+      children.push(createSectionHeader('Key Projects'));
+      for (const proj of data.projects) {
+        children.push(
+          new Paragraph({
+            spacing: { before: 120, after: 60 },
+            children: [
+              new TextRun({
+                text: proj.title,
+                bold: true,
+                size: 21,
+                color: primaryHex,
+              }),
+              new TextRun({
+                text: proj.technologies && proj.technologies.length > 0 ? ` [${proj.technologies.join(', ')}]` : '',
+                italics: true,
+                size: 19,
+                color: secondaryHex,
+              }),
+            ],
+          })
+        );
+
+        for (const bullet of proj.bullets || []) {
+          children.push(
+            new Paragraph({
+              bullet: { level: 0 },
+              spacing: { after: 60 },
+              children: [
+                new TextRun({
+                  text: bullet,
+                  size: 20,
+                  color: '1e293b',
+                }),
+              ],
+            })
+          );
+        }
+      }
+    }
+
+    // 7. Education
+    if (data.education && data.education.length > 0) {
+      children.push(createSectionHeader('Education'));
+      for (const edu of data.education) {
+        const eduDates = [edu.startDate, edu.endDate].filter(Boolean).join(' – ');
+        children.push(
+          new Paragraph({
+            spacing: { before: 100, after: 40 },
+            children: [
+              new TextRun({
+                text: edu.degree || 'Degree',
+                bold: true,
+                size: 21,
+                color: primaryHex,
+              }),
+              new TextRun({
+                text: edu.institution ? `  |  ${edu.institution}` : '',
+                size: 21,
+                color: secondaryHex,
+              }),
+              new TextRun({
+                text: eduDates ? ` (${eduDates})` : '',
+                italics: true,
+                size: 19,
+                color: secondaryHex,
+              }),
+            ],
+          })
+        );
+        if (edu.gpa) {
+          children.push(
+            new Paragraph({
+              spacing: { after: 80 },
+              children: [
+                new TextRun({
+                  text: `GPA: ${edu.gpa}`,
+                  size: 19,
+                  color: secondaryHex,
+                }),
+              ],
+            })
+          );
+        }
+      }
+    }
+
+    // 8. Certifications
+    if (data.certifications && data.certifications.length > 0) {
+      children.push(createSectionHeader('Certifications'));
+      for (const cert of data.certifications) {
+        children.push(
+          new Paragraph({
+            bullet: { level: 0 },
+            spacing: { after: 60 },
+            children: [
+              new TextRun({
+                text: cert.name,
+                bold: true,
+                size: 20,
+                color: primaryHex,
+              }),
+              new TextRun({
+                text: cert.issuer ? ` — ${cert.issuer}` : '',
+                size: 20,
+                color: secondaryHex,
+              }),
+              new TextRun({
+                text: cert.date ? ` (${cert.date})` : '',
+                italics: true,
+                size: 19,
+                color: secondaryHex,
+              }),
+            ],
+          })
+        );
+      }
+    }
+
+    // 9. Achievements
+    if (data.achievements && data.achievements.length > 0) {
+      children.push(createSectionHeader('Key Achievements'));
+      for (const ach of data.achievements) {
+        children.push(
+          new Paragraph({
+            bullet: { level: 0 },
+            spacing: { after: 60 },
+            children: [
+              new TextRun({
+                text: `${ach.title}: `,
+                bold: true,
+                size: 20,
+                color: primaryHex,
+              }),
+              new TextRun({
+                text: ach.description,
+                size: 20,
+                color: '1e293b',
+              }),
+            ],
+          })
+        );
+      }
+    }
+
+    const doc = new Document({
+      sections: [
+        {
+          properties: {
+            page: {
+              margin: {
+                top: 720, // 0.5 inch
+                right: 720,
+                bottom: 720,
+                left: 720,
+              },
+            },
+          },
+          children,
+        },
+      ],
+    });
+
+    return await Packer.toBuffer(doc);
   }
 }
 

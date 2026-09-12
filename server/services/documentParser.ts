@@ -28,17 +28,166 @@ export interface ParsedDocumentResult {
 }
 
 const SECTION_TAXONOMY: Record<string, string[]> = {
-  summary: ['summary', 'professional summary', 'executive summary', 'career objective', 'about me', 'profile', 'personal profile'],
-  experience: ['experience', 'work experience', 'professional experience', 'employment history', 'work history', 'career history'],
-  education: ['education', 'academic background', 'educational background', 'academic qualifications', 'degrees', 'education & credentials'],
-  skills: ['skills', 'technical skills', 'core competencies', 'skills & abilities', 'technologies', 'technical proficiencies', 'areas of expertise', 'tools & technologies'],
-  projects: ['projects', 'key projects', 'personal projects', 'technical projects', 'open source projects', 'portfolio'],
-  certifications: ['certifications', 'licenses', 'credentials', 'certifications & licenses', 'courses & certificates'],
-  achievements: ['achievements', 'key achievements', 'honors', 'awards', 'honors & awards', 'accomplishments'],
-  publications: ['publications', 'research', 'papers', 'articles', 'whitepapers'],
+  summary: [
+    'summary',
+    'professional summary',
+    'executive summary',
+    'career summary',
+    'career objective',
+    'about me',
+    'profile',
+    'personal profile',
+    'professional profile',
+    'biography',
+    'overview',
+  ],
+  experience: [
+    'experience',
+    'work experience',
+    'professional experience',
+    'employment history',
+    'work history',
+    'career history',
+    'professional background',
+    'relevant experience',
+    'selected experience',
+    'experience & employment',
+    'employment',
+    'industry experience',
+  ],
+  education: [
+    'education',
+    'academic background',
+    'educational background',
+    'academic qualifications',
+    'degrees',
+    'education & credentials',
+    'academic history',
+    'education & training',
+    'academic credentials',
+    'academic qualifications & education',
+  ],
+  skills: [
+    'skills',
+    'technical skills',
+    'core competencies',
+    'skills & abilities',
+    'technologies',
+    'technical proficiencies',
+    'areas of expertise',
+    'tools & technologies',
+    'technical stack',
+    'tech tooling',
+    'technical expertise',
+    'technical toolbox',
+    'key skills',
+    'competencies',
+    'technical skills & competencies',
+  ],
+  projects: [
+    'projects',
+    'key projects',
+    'personal projects',
+    'technical projects',
+    'open source projects',
+    'portfolio',
+    'selected projects',
+    'featured projects',
+    'notable projects',
+  ],
+  certifications: [
+    'certifications',
+    'licenses',
+    'credentials',
+    'certifications & licenses',
+    'courses & certificates',
+    'licenses & certifications',
+    'certifications & credentials',
+    'professional certifications',
+  ],
+  achievements: [
+    'achievements',
+    'key achievements',
+    'honors',
+    'awards',
+    'honors & awards',
+    'accomplishments',
+    'selected accomplishments',
+    'notable accomplishments',
+    'accolades',
+  ],
+  publications: ['publications', 'research', 'papers', 'articles', 'whitepapers', 'presentations'],
 };
 
 export class DocumentParser {
+  /**
+   * Cleans and normalizes UTF-8 text, eliminating non-printable control characters,
+   * standardizing typographic dashes, quotes, and bullet symbols.
+   */
+  public cleanAndNormalizeText(rawText: string): string {
+    if (!rawText) return '';
+
+    return rawText
+      // Replace non-breaking spaces with standard ASCII space
+      .replace(/\u00A0/g, ' ')
+      // Replace non-standard whitespace characters with single space
+      .replace(/[\u2000-\u200B\u202F\u205F\u3000]/g, ' ')
+      // Normalize typographic single quotes and apostrophes
+      .replace(/[\u2018\u2019\u201A\u201B]/g, "'")
+      // Normalize typographic double quotes
+      .replace(/[\u201C\u201D\u201E\u201F]/g, '"')
+      // Normalize typographic dashes / hyphens
+      .replace(/[\u2010\u2011\u2012\u2013\u2014\u2015\u2212]/g, '-')
+      // Normalize diverse bullet characters to standard bullet symbol
+      .replace(/^[\t ]*[\u2022\u2023\u25E6\u2043\u2219\u25AA\u25AB\u25CF\u25CB\u25B8\u2042\u2013\u2014\*]\s*/gm, '• ')
+      // Strip control characters (except newline, carriage return, tab)
+      .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+      // Normalize carriage returns to standard newlines
+      .replace(/\r\n/g, '\n')
+      .replace(/\r/g, '\n')
+      .trim();
+  }
+
+  /**
+   * Detects side-by-side columns in multi-column formatted resumes and de-columnizes
+   * the text into distinct linear sequences so section headings and contents are not interlaced.
+   */
+  public deColumnizeText(rawText: string): { text: string; wasDeColumnized: boolean } {
+    const lines = rawText.split('\n');
+    const columnSplitRegex = /\s{5,}|\t{2,}/;
+    let splitCandidateCount = 0;
+
+    for (const line of lines) {
+      if (columnSplitRegex.test(line) && line.trim().length > 20) {
+        splitCandidateCount++;
+      }
+    }
+
+    // If more than 20% of lines show distinct wide gutters, de-columnize
+    if (splitCandidateCount >= 5 && splitCandidateCount / Math.max(1, lines.length) > 0.15) {
+      const leftColumnLines: string[] = [];
+      const rightColumnLines: string[] = [];
+
+      for (const line of lines) {
+        const parts = line.split(columnSplitRegex);
+        if (parts.length >= 2) {
+          const left = parts[0].trim();
+          const right = parts.slice(1).join(' ').trim();
+          if (left) leftColumnLines.push(left);
+          if (right) rightColumnLines.push(right);
+        } else {
+          // If line has no gutter, associate with left column
+          if (line.trim()) leftColumnLines.push(line.trim());
+        }
+      }
+
+      const deColumnized = [...leftColumnLines, '', ...rightColumnLines].join('\n');
+      return { text: deColumnized, wasDeColumnized: true };
+    }
+
+    return { text: rawText, wasDeColumnized: false };
+  }
+
   /**
    * Parse text from either raw text, base64 payload, or buffer
    */
@@ -75,15 +224,24 @@ export class DocumentParser {
       extractedText = buffer.toString('utf-8');
     }
 
-    if (!extractedText || extractedText.trim().length === 0) {
+    // Clean and normalize UTF-8 text (strip control characters, standardize quotes/dashes/bullets)
+    let cleanedText = this.cleanAndNormalizeText(extractedText);
+
+    if (!cleanedText || cleanedText.length === 0) {
       throw new Error(
         'The uploaded document contains no extractable text. Please ensure it is a digital PDF or DOCX file rather than a scanned image.'
       );
     }
 
-    const layout = this.analyzeTextLayout(extractedText);
+    // Detect and de-columnize multi-column layouts to preserve logical section order
+    const { text: processedText, wasDeColumnized } = this.deColumnizeText(cleanedText);
+
+    const layout = this.analyzeTextLayout(processedText);
     layout.layoutInfo.detectedPageCountEstimate = pageCount;
     layout.layoutInfo.ocrTriggered = ocrTriggered;
+    if (wasDeColumnized) {
+      layout.layoutInfo.hasMultiColumnClues = true;
+    }
     return layout;
   }
 

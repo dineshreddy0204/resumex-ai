@@ -105,6 +105,22 @@ apiRouter.get('/health', async (_req: Request, res: Response) => {
   });
 });
 
+apiRouter.get('/ready', async (_req: Request, res: Response) => {
+  try {
+    const check = await db.getPool().query('SELECT 1');
+    if (check.rows.length > 0) {
+      return res.status(200).json({ ready: true, database: 'connected', timestamp: new Date().toISOString() });
+    }
+    return res.status(503).json({ ready: false, database: 'unhealthy', timestamp: new Date().toISOString() });
+  } catch (err) {
+    return res.status(503).json({
+      ready: false,
+      database: 'disconnected',
+      error: err instanceof Error ? err.message : 'Database error',
+    });
+  }
+});
+
 // --- 2. AUTHENTICATION & SECURITY ---
 
 // Email signup
@@ -1099,6 +1115,25 @@ apiRouter.post('/exports/plain-text', requireAuth, (req: AuthenticatedRequest, r
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Export failed.';
     sendStructuredError(res, 400, 'EXPORT_FAILED', msg);
+  }
+});
+
+apiRouter.post('/exports/docx', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { data, templateId } = req.body;
+    if (!data) {
+      return sendStructuredError(res, 400, 'MISSING_DATA', 'Resume data is required for DOCX export.');
+    }
+
+    const buffer = await exportEngine.generateDocx(data, templateId || 'ats-classic');
+    const safeTitle = (data.personal_info?.name || 'Resume').replace(/[^a-zA-Z0-9_-]/g, '_');
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}_ResumeX.docx"`);
+    res.send(buffer);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'DOCX export generation failed.';
+    sendStructuredError(res, 500, 'DOCX_EXPORT_FAILED', msg);
   }
 });
 

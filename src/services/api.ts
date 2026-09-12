@@ -423,6 +423,29 @@ class ApiClient {
     });
   }
 
+  public async exportDocx(data: any, templateId?: string): Promise<Blob> {
+    const headers = new Headers();
+    headers.set('Content-Type', 'application/json');
+    if (this.token) {
+      headers.set('Authorization', `Bearer ${this.token}`);
+    }
+    const response = await fetch('/api/exports/docx', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers,
+      body: JSON.stringify({ data, templateId }),
+    });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: 'DOCX export failed' }));
+      const message =
+        errorData && errorData.error && typeof errorData.error === 'object'
+          ? errorData.error.message
+          : errorData.error || `HTTP ${response.status}: ${response.statusText}`;
+      throw new Error(message);
+    }
+    return response.blob();
+  }
+
   // --- NLP Evaluation Suite ---
   public async runEvaluation(): Promise<{ report: any }> {
     return this.request('/evaluation');

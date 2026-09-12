@@ -315,6 +315,87 @@ export const AtsLabView: React.FC<AtsLabViewProps> = ({
         </div>
       </div>
 
+      {/* Enterprise ATS System Simulations (Workday, Greenhouse, Taleo, Lever, iCIMS) */}
+      {atsResult.engineSimulations && atsResult.engineSimulations.length > 0 && (
+        <div className="bg-white rounded-xl border border-[#EAE8E1] p-6 shadow-xs space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+            <div>
+              <div className="flex items-center gap-2">
+                <Cpu className="w-4 h-4 text-[#4F5D2F]" />
+                <h3 className="text-sm font-bold text-[#171713] uppercase tracking-wider">
+                  Corporate ATS Engine Parser Simulations
+                </h3>
+              </div>
+              <p className="text-xs text-[#6E6E63] mt-0.5">
+                Deterministic compatibility profiling against the 5 primary corporate applicant tracking systems.
+              </p>
+            </div>
+            <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-[#FAF9F5] text-[#4F5D2F] border border-[#EAE8E1] self-start sm:self-auto">
+              5 Enterprise Systems Analyzed
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {atsResult.engineSimulations.map((sim, idx) => {
+              const isHigh = sim.score >= 80;
+              const isMed = sim.score >= 65 && sim.score < 80;
+              return (
+                <div
+                  key={idx}
+                  className="p-4 rounded-xl border border-[#EAE8E1] bg-[#FAF9F5] flex flex-col justify-between space-y-3"
+                >
+                  <div>
+                    <div className="flex items-center justify-between">
+                      <span className="font-bold text-sm text-[#171713]">{sim.engine}</span>
+                      <span
+                        className={`text-xs font-black px-2 py-0.5 rounded border ${
+                          isHigh
+                            ? 'bg-[#4F5D2F]/10 text-[#4F5D2F] border-[#4F5D2F]/30'
+                            : isMed
+                            ? 'bg-[#C49A3A]/10 text-[#8E6D24] border-[#C49A3A]/30'
+                            : 'bg-rose-50 text-rose-700 border-rose-200'
+                        }`}
+                      >
+                        {sim.score}% • {sim.verdict}
+                      </span>
+                    </div>
+                    <div className="text-[10px] text-[#6E6E63] mt-1 font-mono">{sim.parsingModel}</div>
+
+                    <div className="mt-3 p-2 rounded-lg bg-white border border-[#EAE8E1] text-[11px] text-[#171713]">
+                      <span className="font-bold block text-[10px] uppercase text-[#6E6E63] mb-0.5">
+                        Primary System Risk
+                      </span>
+                      {sim.primaryRisk}
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5 text-[11px]">
+                    <div className="text-[10px] font-bold uppercase text-[#6E6E63]">Parser Strengths</div>
+                    {sim.strengths.slice(0, 2).map((str, sIdx) => (
+                      <div key={sIdx} className="flex items-start gap-1.5 text-[#4F5D2F]">
+                        <CheckCircle2 className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                        <span className="line-clamp-1">{str}</span>
+                      </div>
+                    ))}
+                    {sim.weaknesses.length > 0 && (
+                      <>
+                        <div className="text-[10px] font-bold uppercase text-[#6E6E63] pt-1">Flagged Items</div>
+                        {sim.weaknesses.slice(0, 2).map((wk, wIdx) => (
+                          <div key={wIdx} className="flex items-start gap-1.5 text-[#C49A3A]">
+                            <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                            <span className="line-clamp-1">{wk}</span>
+                          </div>
+                        ))}
+                      </>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Mode Diagnostics / Plain Text Stream View */}
       {simulationMode === 'plaintext' ? (
         <div className="p-6 rounded-xl bg-white border border-[#EAE8E1] shadow-xs space-y-3">

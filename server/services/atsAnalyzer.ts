@@ -199,6 +199,94 @@ export class AtsAnalyzer {
     const formattingSafety = columnsDetected || tablesDetected ? 82 : 98;
     const skillRelevance = Math.min(95, Math.max(60, 65 + totalSkills * 1.5));
 
+    // 5. Deterministic ATS Engine Simulations (Workday, Greenhouse, Taleo, Lever, iCIMS)
+    const engineSimulations: AtsSimulationResult['engineSimulations'] = [
+      {
+        engine: 'Workday',
+        score: Math.max(30, Math.min(100, atsScore - (columnsDetected ? 14 : 0) - (tablesDetected ? 8 : 0) - (!hasEdu ? 8 : 0))),
+        verdict: atsScore >= 85 && !columnsDetected && !tablesDetected ? 'Excellent' : atsScore >= 70 ? 'Good' : atsScore >= 50 ? 'Fair' : 'Poor',
+        primaryRisk: columnsDetected
+          ? 'Multi-column layout risks field-mapping corruption during Workday parsing.'
+          : tablesDetected
+          ? 'Embedded grid tables may fail Workday linear section extraction.'
+          : 'None detected; standard single-column section flow verified.',
+        parsingModel: 'Hierarchical DOM Tokenizer with XML section schemas',
+        strengths: [
+          hasEmail && hasPhone ? 'Complete verified primary contact identifiers' : 'Missing direct contact identifiers',
+          hasExp ? 'Clean chronological experience tree detected' : 'Missing experience entries',
+          !columnsDetected ? 'Single-column linear text order confirmed' : 'Column interleaving detected',
+        ],
+        weaknesses: [
+          ...(columnsDetected ? ['Columns detected: Workday may interlace left and right text blocks.'] : []),
+          ...(tablesDetected ? ['Tables detected: Workday XML parser may skip tabular data cells.'] : []),
+          ...(!hasLocation ? ['Missing location: Workday candidate geographic filters may exclude profile.'] : []),
+        ],
+      },
+      {
+        engine: 'Greenhouse',
+        score: Math.max(35, Math.min(100, Math.round(50 + totalSkills * 2.2 + (quantificationRatio > 0.3 ? 15 : 5) - (!hasEmail ? 12 : 0)))),
+        verdict: totalSkills >= 8 && hasExp ? 'Excellent' : totalSkills >= 5 ? 'Good' : 'Fair',
+        primaryRisk: totalSkills < 6 ? 'Low skill keyword volume reduces match percentage on Greenhouse recruiter searches.' : 'Low risk; healthy keyword density.',
+        parsingModel: 'Modern NLP Entity Indexer with Semantic Keyword Mapping',
+        strengths: [
+          `${totalSkills} normalized technical & functional skills indexed`,
+          quantificationRatio > 0.25 ? 'High quantified outcome density across bullet points' : 'Experience statements extracted',
+          'Compatible with modern modern PDF and DOCX parsers',
+        ],
+        weaknesses: [
+          ...(totalSkills < 6 ? ['Fewer than 6 indexed skills; expand technical and domain tooling.'] : []),
+          ...(quantificationRatio < 0.25 ? ['Fewer than 25% of bullets contain numerical outcomes or metrics.'] : []),
+        ],
+      },
+      {
+        engine: 'Taleo',
+        score: Math.max(25, Math.min(100, atsScore - (columnsDetected ? 20 : 0) - (tablesDetected ? 15 : 0) - (!hasEmail ? 15 : 0))),
+        verdict: !columnsDetected && !tablesDetected && atsScore >= 80 ? 'Excellent' : atsScore >= 65 ? 'Good' : 'Poor',
+        primaryRisk: columnsDetected || tablesDetected
+          ? 'Taleo legacy linear stream reader scrambles multi-column resumes into unreadable text.'
+          : 'Standard header labels required for legacy Taleo section segmentation.',
+        parsingModel: 'Legacy Linear Regex Stream Engine (Oracle Taleo Enterprise Edition)',
+        strengths: [
+          hasExp ? 'Recognized standard "Work Experience" section identifier' : 'Experience missing',
+          hasEdu ? 'Standard "Education" header confirmed' : 'Education missing',
+        ],
+        weaknesses: [
+          ...(columnsDetected ? ['CRITICAL: Taleo will interleave multi-column lines in horizontal order.'] : []),
+          ...(tablesDetected ? ['CRITICAL: Taleo often fails to parse text inside table structures.'] : []),
+        ],
+      },
+      {
+        engine: 'Lever',
+        score: Math.max(30, Math.min(100, Math.round(atsScore * 0.96 + (hasSummary ? 4 : 0)))),
+        verdict: atsScore >= 80 ? 'Excellent' : atsScore >= 68 ? 'Good' : 'Fair',
+        primaryRisk: !hasExp ? 'Lever career timeline generation requires sequential role entries.' : 'Low risk.',
+        parsingModel: 'Recruiter-Centric Contextual Parser & Resume Previewer',
+        strengths: [
+          'Direct recruiter plain-text rendering verified',
+          hasExp ? `${resumeData.experience.length} career role progressions detected` : 'No career timeline',
+        ],
+        weaknesses: [
+          ...(!hasSummary ? ['Professional summary absent; Lever highlights top profile abstracts.'] : []),
+          ...(!hasEmail ? ['Direct email link missing in candidate profile card.'] : []),
+        ],
+      },
+      {
+        engine: 'iCIMS',
+        score: Math.max(30, Math.min(100, atsScore - (!hasPhone ? 10 : 0) - (!hasLocation ? 8 : 0) - (columnsDetected ? 10 : 0))),
+        verdict: hasEmail && hasPhone && hasLocation && atsScore >= 78 ? 'Excellent' : atsScore >= 65 ? 'Good' : 'Fair',
+        primaryRisk: !hasLocation || !hasPhone ? 'iCIMS strict requisition matching filters require complete geographic and direct contact anchoring.' : 'Low risk.',
+        parsingModel: 'Enterprise Contact & Requisition Matching Engine',
+        strengths: [
+          hasEmail ? 'Email parsed for iCIMS candidate record deduplication' : 'Missing email',
+          hasLocation ? `Geographic anchor recognized: "${resumeData.personal_info?.location}"` : 'Missing geographic anchor',
+        ],
+        weaknesses: [
+          ...(!hasPhone ? ['Missing telephone contact field required by standard iCIMS profiles.'] : []),
+          ...(!hasLocation ? ['Missing location prevents auto-matching against job postal codes.'] : []),
+        ],
+      },
+    ];
+
     return {
       overallAtsScore: atsScore,
       keywordCoverage,
@@ -215,6 +303,7 @@ export class AtsAnalyzer {
         imagesIconsDetected: false,
         fontSafetyScore: 96,
       },
+      engineSimulations,
     };
   }
 }

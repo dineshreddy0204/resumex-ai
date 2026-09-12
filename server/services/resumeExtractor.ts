@@ -65,7 +65,7 @@ export class ResumeExtractor {
     const searchBlock = searchLines.join(' \n ');
 
     // Name detection: usually line 0 or line with only 2-3 capitalized words, not an email/phone/url
-    let name = 'Candidate Name';
+    let name = '';
     for (const l of searchLines) {
       const clean = l.replace(/[^a-zA-Z\s]/g, '').trim();
       const words = clean.split(/\s+/);
@@ -182,15 +182,15 @@ export class ResumeExtractor {
         const remainder = line.replace(dateRegex, '').trim();
         const parts = remainder.split(/(?:\||,|–|-|at)\s+/).map((p) => p.trim()).filter(Boolean);
 
-        const role = parts[0] || 'Software Engineer';
-        const company = parts[1] || parts[0] || 'Technology Company';
+        const role = parts[0] ? parts[0].replace(/[^a-zA-Z0-9\s&.]/g, '').trim() : '';
+        const company = parts[1] ? parts[1].replace(/[^a-zA-Z0-9\s&.]/g, '').trim() : '';
 
         currentExp = {
           id: `exp-${items.length + 1}`,
-          company: company.replace(/[^a-zA-Z0-9\s&.]/g, '').trim(),
-          role: role.replace(/[^a-zA-Z0-9\s&.]/g, '').trim(),
-          startDate: startDate || '2021',
-          endDate: endDate || 'Present',
+          company: company,
+          role: role,
+          startDate: startDate || '',
+          endDate: endDate || '',
           bullets: [],
           technologies: [],
         };
@@ -213,16 +213,21 @@ export class ResumeExtractor {
       items.push(currentExp);
     }
 
-    // Fallback if formatting was dense
+    // Preserve extracted bullets without fabricating mock role or company names
     if (items.length === 0 && expSec.content.length > 0) {
-      items.push({
-        id: 'exp-1',
-        company: 'Professional Experience',
-        role: 'Role Title',
-        startDate: '2021',
-        endDate: 'Present',
-        bullets: expSec.content.filter((c) => c.length > 10),
-      });
+      const validBullets = expSec.content
+        .map((c) => c.replace(/^[•\-\*\▪\◦\–\—\>]\s*/, '').trim())
+        .filter((c) => c.length > 10);
+      if (validBullets.length > 0) {
+        items.push({
+          id: 'exp-1',
+          company: '',
+          role: '',
+          startDate: '',
+          endDate: '',
+          bullets: validBullets,
+        });
+      }
     }
 
     provenance.push({
@@ -258,13 +263,13 @@ export class ResumeExtractor {
           items.push(currentEdu);
         }
         const degMatch = line.match(degreeKeywords);
-        const degree = degMatch ? line.trim() : 'Bachelor of Science';
+        const degree = degMatch ? line.trim() : '';
         currentEdu = {
           id: `edu-${items.length + 1}`,
-          institution: 'University',
+          institution: '',
           degree: degree,
-          startDate: dates && dates[0] ? dates[0] : '2016',
-          endDate: dates && dates[1] ? dates[1] : (dates && dates[0] ? dates[0] : '2020'),
+          startDate: dates && dates[0] ? dates[0] : '',
+          endDate: dates && dates[1] ? dates[1] : (dates && dates[0] ? dates[0] : ''),
         };
       } else if (currentEdu) {
         if (line.toLowerCase().includes('university') || line.toLowerCase().includes('college') || line.toLowerCase().includes('institute')) {
@@ -283,10 +288,10 @@ export class ResumeExtractor {
     if (items.length === 0 && eduSec.content.length > 0) {
       items.push({
         id: 'edu-1',
-        institution: eduSec.content[0] || 'University',
-        degree: eduSec.content[1] || 'Bachelor of Science in Computer Science',
-        startDate: '2016',
-        endDate: '2020',
+        institution: eduSec.content[0] || '',
+        degree: eduSec.content[1] || '',
+        startDate: '',
+        endDate: '',
       });
     }
 
@@ -367,8 +372,8 @@ export class ResumeExtractor {
         items.push({
           id: `cert-${i + 1}`,
           name: parts[0]?.trim() || line,
-          issuer: parts[1]?.trim() || 'Accredited Authority',
-          date: '2023',
+          issuer: parts[1]?.trim() || '',
+          date: '',
         });
       }
     }

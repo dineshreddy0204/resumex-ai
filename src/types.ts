@@ -125,6 +125,15 @@ export interface AtsSimulationResult {
     imagesIconsDetected: boolean;
     fontSafetyScore: number;
   };
+  engineSimulations?: {
+    engine: 'Workday' | 'Greenhouse' | 'Taleo' | 'Lever' | 'iCIMS';
+    score: number;
+    verdict: 'Excellent' | 'Good' | 'Fair' | 'Poor';
+    primaryRisk: string;
+    parsingModel: string;
+    strengths: string[];
+    weaknesses: string[];
+  }[];
 }
 
 export interface AnalysisIssue {

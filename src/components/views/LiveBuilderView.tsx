@@ -140,21 +140,284 @@ export const LiveBuilderView: React.FC<LiveBuilderViewProps> = ({
   };
 
   // --- Exporting ---
+  const [exportingDocx, setExportingDocx] = useState(false);
+  const [showExportModal, setShowExportModal] = useState(false);
+  const [validatingExport, setValidatingExport] = useState(false);
+  const [exportValidation, setExportValidation] = useState<any | null>(null);
+
+  const parseHexColor = (hex: string): [number, number, number] => {
+    const clean = (hex || '#171713').replace('#', '');
+    const full = clean.length === 3 ? clean.split('').map((c) => c + c).join('') : clean;
+    const num = parseInt(full, 16);
+    return [(num >> 16) & 255, (num >> 8) & 255, num & 255];
+  };
+
+  const handleOpenExportModal = async () => {
+    setShowExportModal(true);
+    setValidatingExport(true);
+    try {
+      const res = await api.validateExport(formData);
+      setExportValidation(res.validation);
+    } catch {
+      setExportValidation(null);
+    } finally {
+      setValidatingExport(false);
+    }
+  };
+
   const handleExportPdf = () => {
     const doc = new jsPDF({
       unit: 'pt',
       format: 'letter',
     });
 
-    api.exportPlainText(formData).then((res) => {
+    const primaryRgb = parseHexColor(currentTemplate.primaryColor || '#0f172a');
+    const secondaryRgb = parseHexColor(currentTemplate.secondaryColor || '#475569');
+    const accentRgb = parseHexColor(currentTemplate.accentColor || '#0284c7');
+
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const margin = 44;
+    const contentWidth = pageWidth - margin * 2;
+    let cursorY = 46;
+
+    const checkPageBreak = (neededHeight: number) => {
+      if (cursorY + neededHeight > pageHeight - margin) {
+        doc.addPage();
+        cursorY = margin;
+      }
+    };
+
+    // 1. Candidate Name
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(18);
+    doc.setTextColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
+    const name = formData.personal_info?.name || 'Candidate Name';
+    const isCentered = currentTemplate.headerStyle === 'centered';
+    if (isCentered) {
+      doc.text(name, pageWidth / 2, cursorY, { align: 'center' });
+    } else {
+      doc.text(name, margin, cursorY);
+    }
+    cursorY += 16;
+
+    // 2. Contact Details
+    const contactParts: string[] = [];
+    if (formData.personal_info?.email) contactParts.push(formData.personal_info.email);
+    if (formData.personal_info?.phone) contactParts.push(formData.personal_info.phone);
+    if (formData.personal_info?.location) contactParts.push(formData.personal_info.location);
+    if (formData.personal_info?.linkedin) contactParts.push(formData.personal_info.linkedin);
+    if (formData.personal_info?.github) contactParts.push(formData.personal_info.github);
+
+    if (contactParts.length > 0) {
       doc.setFont('helvetica', 'normal');
-      doc.setFontSize(10);
-      const splitText = doc.splitTextToSize(res.plainText, 540);
-      doc.text(splitText, 36, 40);
-      doc.save(`${resumeTitle.replace(/\s+/g, '_')}.pdf`);
-      setToastMessage('PDF downloaded successfully.');
+      doc.setFontSize(9);
+      doc.setTextColor(secondaryRgb[0], secondaryRgb[1], secondaryRgb[2]);
+      const contactStr = contactParts.join('   •   ');
+      if (isCentered) {
+        doc.text(contactStr, pageWidth / 2, cursorY, { align: 'center' });
+      } else {
+        doc.text(contactStr, margin, cursorY);
+      }
+      cursorY += 14;
+    }
+
+    // Top Divider
+    doc.setDrawColor(accentRgb[0], accentRgb[1], accentRgb[2]);
+    doc.setLineWidth(1);
+    doc.line(margin, cursorY, pageWidth - margin, cursorY);
+    cursorY += 16;
+
+    const renderSectionHeader = (title: string) => {
+      checkPageBreak(30);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10.5);
+      doc.setTextColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
+      doc.text(title.toUpperCase(), margin, cursorY);
+      cursorY += 4;
+      doc.setDrawColor(accentRgb[0], accentRgb[1], accentRgb[2]);
+      doc.setLineWidth(0.5);
+      doc.line(margin, cursorY, pageWidth - margin, cursorY);
+      cursorY += 12;
+    };
+
+    // 3. Professional Summary
+    if (formData.summary && formData.summary.trim()) {
+      renderSectionHeader('Professional Summary');
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9.5);
+      doc.setTextColor(40, 40, 40);
+      const splitSummary = doc.splitTextToSize(formData.summary.trim(), contentWidth);
+      checkPageBreak(splitSummary.length * 12 + 8);
+      doc.text(splitSummary, margin, cursorY);
+      cursorY += splitSummary.length * 12 + 10;
+    }
+
+    // 4. Skills
+    if (formData.skills && formData.skills.length > 0) {
+      renderSectionHeader('Technical Skills & Expertise');
+      for (const group of formData.skills) {
+        if (!group.items || group.items.length === 0) continue;
+        checkPageBreak(14);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(9);
+        doc.setTextColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
+        const catLabel = `${group.category}: `;
+        doc.text(catLabel, margin, cursorY);
+        const catWidth = doc.getTextWidth(catLabel);
+
+        doc.setFont('helvetica', 'normal');
+        doc.setTextColor(60, 60, 60);
+        const itemsStr = group.items.join(', ');
+        const splitItems = doc.splitTextToSize(itemsStr, contentWidth - catWidth);
+        doc.text(splitItems, margin + catWidth, cursorY);
+        cursorY += splitItems.length * 12 + 2;
+      }
+      cursorY += 6;
+    }
+
+    // 5. Work Experience
+    if (formData.experience && formData.experience.length > 0) {
+      renderSectionHeader('Professional Experience');
+      for (const exp of formData.experience) {
+        checkPageBreak(36);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(10);
+        doc.setTextColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
+        doc.text(exp.role || 'Role', margin, cursorY);
+
+        const dateRange = [exp.startDate, exp.endDate].filter(Boolean).join(' – ');
+        if (dateRange) {
+          doc.setFont('helvetica', 'italic');
+          doc.setFontSize(9);
+          doc.setTextColor(secondaryRgb[0], secondaryRgb[1], secondaryRgb[2]);
+          doc.text(dateRange, pageWidth - margin, cursorY, { align: 'right' });
+        }
+        cursorY += 12;
+
+        if (exp.company) {
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(9.5);
+          doc.setTextColor(secondaryRgb[0], secondaryRgb[1], secondaryRgb[2]);
+          const compLoc = [exp.company, exp.location].filter(Boolean).join('  •  ');
+          doc.text(compLoc, margin, cursorY);
+          cursorY += 12;
+        }
+
+        for (const bullet of exp.bullets || []) {
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(9);
+          doc.setTextColor(40, 40, 40);
+          const splitBullet = doc.splitTextToSize(bullet, contentWidth - 14);
+          checkPageBreak(splitBullet.length * 11 + 4);
+          doc.text('•', margin + 2, cursorY);
+          doc.text(splitBullet, margin + 12, cursorY);
+          cursorY += splitBullet.length * 11 + 3;
+        }
+        cursorY += 6;
+      }
+    }
+
+    // 6. Projects
+    if (formData.projects && formData.projects.length > 0) {
+      renderSectionHeader('Key Projects');
+      for (const proj of formData.projects) {
+        checkPageBreak(24);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(9.5);
+        doc.setTextColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
+        doc.text(proj.title, margin, cursorY);
+
+        if (proj.technologies && proj.technologies.length > 0) {
+          doc.setFont('helvetica', 'italic');
+          doc.setFontSize(8.5);
+          doc.setTextColor(secondaryRgb[0], secondaryRgb[1], secondaryRgb[2]);
+          doc.text(`[${proj.technologies.join(', ')}]`, pageWidth - margin, cursorY, { align: 'right' });
+        }
+        cursorY += 12;
+
+        for (const bullet of proj.bullets || []) {
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(9);
+          doc.setTextColor(40, 40, 40);
+          const splitBullet = doc.splitTextToSize(bullet, contentWidth - 14);
+          checkPageBreak(splitBullet.length * 11 + 4);
+          doc.text('•', margin + 2, cursorY);
+          doc.text(splitBullet, margin + 12, cursorY);
+          cursorY += splitBullet.length * 11 + 3;
+        }
+        cursorY += 4;
+      }
+    }
+
+    // 7. Education
+    if (formData.education && formData.education.length > 0) {
+      renderSectionHeader('Education');
+      for (const edu of formData.education) {
+        checkPageBreak(24);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(9.5);
+        doc.setTextColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
+        doc.text(edu.degree || 'Degree', margin, cursorY);
+
+        const eduDates = [edu.startDate, edu.endDate].filter(Boolean).join(' – ');
+        if (eduDates) {
+          doc.setFont('helvetica', 'italic');
+          doc.setFontSize(8.5);
+          doc.setTextColor(secondaryRgb[0], secondaryRgb[1], secondaryRgb[2]);
+          doc.text(eduDates, pageWidth - margin, cursorY, { align: 'right' });
+        }
+        cursorY += 12;
+
+        if (edu.institution) {
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(9);
+          doc.setTextColor(secondaryRgb[0], secondaryRgb[1], secondaryRgb[2]);
+          const line = [edu.institution, edu.fieldOfStudy, edu.gpa ? `GPA: ${edu.gpa}` : ''].filter(Boolean).join('  •  ');
+          doc.text(line, margin, cursorY);
+          cursorY += 12;
+        }
+      }
+    }
+
+    // 8. Certifications
+    if (formData.certifications && formData.certifications.length > 0) {
+      renderSectionHeader('Certifications');
+      for (const cert of formData.certifications) {
+        checkPageBreak(16);
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(9);
+        doc.setTextColor(40, 40, 40);
+        const certLine = `•  ${cert.name}${cert.issuer ? ` — ${cert.issuer}` : ''}${cert.date ? ` (${cert.date})` : ''}`;
+        const splitCert = doc.splitTextToSize(certLine, contentWidth);
+        doc.text(splitCert, margin, cursorY);
+        cursorY += splitCert.length * 11 + 2;
+      }
+    }
+
+    doc.save(`${(formData.personal_info?.name || resumeTitle).replace(/\s+/g, '_')}_ResumeX.pdf`);
+    setToastMessage('Formatted PDF downloaded successfully.');
+    setTimeout(() => setToastMessage(null), 3000);
+  };
+
+  const handleExportDocx = async () => {
+    setExportingDocx(true);
+    try {
+      const blob = await api.exportDocx(formData, selectedTemplateId);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${(formData.personal_info?.name || resumeTitle).replace(/\s+/g, '_')}_ResumeX.docx`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setToastMessage('Word Document (.docx) downloaded successfully.');
       setTimeout(() => setToastMessage(null), 3000);
-    });
+    } catch (err: any) {
+      setToastMessage(err.message || 'DOCX export failed.');
+      setTimeout(() => setToastMessage(null), 3500);
+    } finally {
+      setExportingDocx(false);
+    }
   };
 
   const handleExportPlainText = async () => {
@@ -177,11 +440,11 @@ export const LiveBuilderView: React.FC<LiveBuilderViewProps> = ({
       experience: [
         {
           id: `exp-${Date.now()}`,
-          company: 'Target Corporation',
-          role: 'Software Engineer',
+          company: 'Company / Organization',
+          role: 'Role Title',
           startDate: '2023',
           endDate: 'Present',
-          bullets: ['Engineered scalable web service with automated CI/CD and comprehensive unit test coverage.'],
+          bullets: ['Spearheaded engineering deliverables and collaborated across multidisciplinary teams.'],
         },
         ...formData.experience,
       ],
@@ -190,7 +453,7 @@ export const LiveBuilderView: React.FC<LiveBuilderViewProps> = ({
 
   const handleAddBullet = (expIdx: number) => {
     const updated = { ...formData };
-    updated.experience[expIdx].bullets.push('Architected resilient sub-system improving query response times by 30%.');
+    updated.experience[expIdx].bullets.push('Architected resilient sub-system improving performance metrics.');
     setFormData(updated);
   };
 
@@ -263,20 +526,188 @@ export const LiveBuilderView: React.FC<LiveBuilderViewProps> = ({
           <button
             onClick={handleExportPdf}
             className="px-3 py-1.5 rounded-lg bg-white hover:bg-[#FAF9F5] text-[#171713] text-xs font-semibold border border-[#D5D2C7] flex items-center gap-1.5 transition shadow-2xs"
+            title="Download formatted PDF matching active template"
           >
             <Download className="w-3.5 h-3.5 text-[#4F5D2F]" />
-            <span>Export PDF</span>
+            <span>PDF</span>
+          </button>
+
+          <button
+            onClick={handleExportDocx}
+            disabled={exportingDocx}
+            className="px-3 py-1.5 rounded-lg bg-white hover:bg-[#FAF9F5] text-[#171713] text-xs font-semibold border border-[#D5D2C7] flex items-center gap-1.5 transition shadow-2xs disabled:opacity-50"
+            title="Download Microsoft Word .docx matching active template"
+          >
+            <FileText className="w-3.5 h-3.5 text-[#0284c7]" />
+            <span>{exportingDocx ? 'Exporting...' : 'DOCX'}</span>
+          </button>
+
+          <button
+            onClick={handleOpenExportModal}
+            className="px-3 py-1.5 rounded-lg bg-[#FAF9F5] hover:bg-white text-[#6E6E63] hover:text-[#171713] text-xs font-semibold border border-[#EAE8E1] flex items-center gap-1.5 transition shadow-2xs"
+            title="Perform pre-export ATS safety check and review diagnostics"
+          >
+            <ShieldCheck className="w-3.5 h-3.5 text-[#4F5D2F]" />
+            <span>Pre-Export Check</span>
           </button>
 
           <button
             onClick={handleExportPlainText}
             className="px-3 py-1.5 rounded-lg bg-[#FAF9F5] hover:bg-white text-[#6E6E63] hover:text-[#171713] text-xs font-semibold border border-[#EAE8E1] flex items-center gap-1.5 transition shadow-2xs"
+            title="Download plain text stream"
           >
-            <FileText className="w-3.5 h-3.5" />
+            <Layers className="w-3.5 h-3.5" />
             <span>Plain Text</span>
           </button>
         </div>
       </div>
+
+      {/* Pre-Export Quality & ATS Safety Modal */}
+      {showExportModal && (
+        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl border border-[#EAE8E1] max-w-xl w-full p-6 shadow-xl space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-[#EAE8E1] pb-3">
+              <div className="flex items-center gap-2">
+                <ShieldCheck className="w-5 h-5 text-[#4F5D2F]" />
+                <h3 className="text-base font-bold text-[#171713]">Pre-Export Readiness Check</h3>
+              </div>
+              <button
+                onClick={() => setShowExportModal(false)}
+                className="text-[#6E6E63] hover:text-[#171713] p-1 rounded-lg"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {validatingExport ? (
+              <div className="py-12 text-center text-xs text-[#6E6E63]">
+                Validating layout structure, contact identity, and ATS scanner safety...
+              </div>
+            ) : exportValidation ? (
+              <div className="space-y-4">
+                {/* Score badge */}
+                <div className="p-4 rounded-xl bg-[#FAF9F5] border border-[#EAE8E1] flex items-center justify-between">
+                  <div>
+                    <div className="text-xs text-[#6E6E63] font-medium">ATS Export Readiness Score</div>
+                    <div className="text-2xl font-black text-[#4F5D2F] mt-0.5">
+                      {exportValidation.atsScore}%
+                    </div>
+                  </div>
+                  <span
+                    className={`text-xs font-bold px-2.5 py-1 rounded-full border ${
+                      exportValidation.isValid
+                        ? 'bg-[#4F5D2F]/10 text-[#4F5D2F] border-[#4F5D2F]/30'
+                        : 'bg-rose-50 text-rose-700 border-rose-200'
+                    }`}
+                  >
+                    {exportValidation.isValid ? 'READY FOR EXPORT' : 'BLOCKERS DETECTED'}
+                  </span>
+                </div>
+
+                {/* Validation Checks */}
+                <div className="space-y-2">
+                  <div className="text-[11px] font-bold uppercase text-[#6E6E63] tracking-wider">
+                    Diagnostic Checks
+                  </div>
+                  {exportValidation.checks?.map((chk: any, idx: number) => (
+                    <div
+                      key={idx}
+                      className="p-3 rounded-lg bg-[#FAF9F5] border border-[#EAE8E1] flex items-start justify-between text-xs gap-3"
+                    >
+                      <div className="flex items-start gap-2">
+                        {chk.passed ? (
+                          <CheckCircle2 className="w-4 h-4 text-[#4F5D2F] mt-0.5 shrink-0" />
+                        ) : (
+                          <AlertCircle className="w-4 h-4 text-[#C49A3A] mt-0.5 shrink-0" />
+                        )}
+                        <div>
+                          <div className="font-bold text-[#171713]">{chk.name}</div>
+                          <div className="text-[#6E6E63] text-[11px] mt-0.5">{chk.details}</div>
+                        </div>
+                      </div>
+                      <span
+                        className={`text-[10px] font-bold px-2 py-0.5 rounded ${
+                          chk.passed
+                            ? 'bg-[#4F5D2F]/10 text-[#4F5D2F]'
+                            : 'bg-[#C49A3A]/15 text-[#8E6D24]'
+                        }`}
+                      >
+                        {chk.passed ? 'PASS' : 'WARN'}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Blockers & Warnings */}
+                {exportValidation.blockers?.length > 0 && (
+                  <div className="p-3 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-800 space-y-1">
+                    <div className="font-bold flex items-center gap-1.5">
+                      <AlertCircle className="w-4 h-4 text-rose-600" />
+                      Critical Export Blockers:
+                    </div>
+                    <ul className="list-disc list-inside space-y-0.5 text-[11px]">
+                      {exportValidation.blockers.map((b: string, i: number) => (
+                        <li key={i}>{b}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {exportValidation.warnings?.length > 0 && (
+                  <div className="p-3 rounded-lg bg-[#FAF9F5] border border-[#C49A3A]/40 text-xs text-[#8E6D24] space-y-1">
+                    <div className="font-bold flex items-center gap-1.5">
+                      <AlertCircle className="w-4 h-4 text-[#C49A3A]" />
+                      Advisory Warnings:
+                    </div>
+                    <ul className="list-disc list-inside space-y-0.5 text-[11px]">
+                      {exportValidation.warnings.map((w: string, i: number) => (
+                        <li key={i}>{w}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {/* Download Actions inside Modal */}
+                <div className="pt-2 border-t border-[#EAE8E1] flex flex-wrap gap-2 justify-end">
+                  <button
+                    onClick={() => {
+                      handleExportPdf();
+                      setShowExportModal(false);
+                    }}
+                    className="px-4 py-2 rounded-lg bg-[#4F5D2F] hover:bg-[#37421F] text-white text-xs font-semibold flex items-center gap-1.5 shadow-xs transition"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Download PDF</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      handleExportDocx();
+                      setShowExportModal(false);
+                    }}
+                    disabled={exportingDocx}
+                    className="px-4 py-2 rounded-lg bg-white hover:bg-[#FAF9F5] text-[#171713] text-xs font-semibold border border-[#D5D2C7] flex items-center gap-1.5 transition shadow-2xs disabled:opacity-50"
+                  >
+                    <FileText className="w-3.5 h-3.5 text-[#0284c7]" />
+                    <span>Download DOCX</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      handleExportPlainText();
+                      setShowExportModal(false);
+                    }}
+                    className="px-4 py-2 rounded-lg bg-[#FAF9F5] hover:bg-[#EAE8E1] text-[#6E6E63] hover:text-[#171713] text-xs font-semibold border border-[#EAE8E1] flex items-center gap-1.5 transition shadow-2xs"
+                  >
+                    <Layers className="w-3.5 h-3.5" />
+                    <span>Plain Text</span>
+                  </button>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      )}
 
       {/* Two-Pane Split Layout */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
