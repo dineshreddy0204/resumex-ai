@@ -20,6 +20,14 @@ export function getGeminiClient(): GoogleGenAI | null {
   return aiClient;
 }
 
+export function getGeminiModel(): string {
+  return process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+}
+
+export function getGeminiEmbeddingModel(): string {
+  return process.env.GEMINI_EMBEDDING_MODEL || 'text-embedding-004';
+}
+
 export function isGeminiAvailable(): boolean {
   return Boolean(process.env.GEMINI_API_KEY && process.env.GEMINI_API_KEY.trim().length > 0);
 }

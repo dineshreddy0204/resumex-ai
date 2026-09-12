@@ -32,16 +32,11 @@ export function hashToken(token: string): string {
 }
 
 /**
- * Extract token from either Authorization Bearer header or HttpOnly cookie
+ * Extract token strictly from HttpOnly session cookie (resumex_token / resumex_session).
+ * In automated test runner mode (NODE_ENV === 'test'), allows Authorization header fallback.
  */
 export function extractToken(req: Request): string | null {
-  // 1. Authorization header (Bearer <token>)
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    return authHeader.substring(7).trim();
-  }
-
-  // 2. HttpOnly Cookie (resumex_token or resumex_session)
+  // 1. HttpOnly Cookie (resumex_token or resumex_session) - Primary Production Mode
   const cookieHeader = req.headers.cookie;
   if (cookieHeader) {
     const match = cookieHeader.match(/(?:^|;\s*)(?:resumex_token|resumex_session)=([^;]+)/);
@@ -50,20 +45,33 @@ export function extractToken(req: Request): string | null {
     }
   }
 
+  // 2. Automated Test Runner Fallback ONLY (never used by frontend client)
+  if (process.env.NODE_ENV === 'test') {
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      return authHeader.substring(7).trim();
+    }
+  }
+
   return null;
 }
 
 /**
- * Set secure session cookie with cross-origin iframe support
+ * Set secure HttpOnly session cookie
  */
-export function setAuthCookie(res: Response, token: string): void {
+export function setAuthCookie(res: Response, token: string, req?: Request): void {
   const maxAgeMs = 7 * 24 * 60 * 60 * 1000; // 7 days
+  const isProd = process.env.NODE_ENV === 'production';
+  // If running embedded in an iframe preview, SameSite=None is required; in standard production top-level, SameSite=Lax
+  const isIframe = req?.headers['sec-fetch-dest'] === 'iframe' || Boolean(req?.headers['x-frame-options']);
+  const sameSite = isIframe ? 'None' : (isProd ? 'Lax' : 'None');
+
   const cookieParts = [
     `resumex_token=${encodeURIComponent(token)}`,
     'Path=/',
     `Max-Age=${Math.floor(maxAgeMs / 1000)}`,
     'HttpOnly',
-    'SameSite=None',
+    `SameSite=${sameSite}`,
     'Secure',
   ];
   res.append('Set-Cookie', cookieParts.join('; '));
@@ -72,17 +80,21 @@ export function setAuthCookie(res: Response, token: string): void {
 /**
  * Clear session cookie on logout or invalidation
  */
-export function clearAuthCookie(res: Response): void {
+export function clearAuthCookie(res: Response, req?: Request): void {
+  const isProd = process.env.NODE_ENV === 'production';
+  const isIframe = req?.headers['sec-fetch-dest'] === 'iframe' || Boolean(req?.headers['x-frame-options']);
+  const sameSite = isIframe ? 'None' : (isProd ? 'Lax' : 'None');
+
   const cookieParts = [
     'resumex_token=',
     'Path=/',
     'Max-Age=0',
     'HttpOnly',
-    'SameSite=None',
+    `SameSite=${sameSite}`,
     'Secure',
   ];
   res.append('Set-Cookie', cookieParts.join('; '));
-  clearCsrfCookie(res);
+  clearCsrfCookie(res, req);
 }
 
 /**
@@ -95,23 +107,31 @@ export function generateCsrfToken(): string {
 /**
  * Set client-accessible CSRF cookie for Double-Submit protection
  */
-export function setCsrfCookie(res: Response, token: string): void {
+export function setCsrfCookie(res: Response, token: string, req?: Request): void {
+  const isProd = process.env.NODE_ENV === 'production';
+  const isIframe = req?.headers['sec-fetch-dest'] === 'iframe' || Boolean(req?.headers['x-frame-options']);
+  const sameSite = isIframe ? 'None' : (isProd ? 'Lax' : 'None');
+
   const cookieParts = [
     `resumex_csrf=${encodeURIComponent(token)}`,
     'Path=/',
     'Max-Age=604800', // 7 days
-    'SameSite=None',
+    `SameSite=${sameSite}`,
     'Secure',
   ];
   res.append('Set-Cookie', cookieParts.join('; '));
 }
 
-export function clearCsrfCookie(res: Response): void {
+export function clearCsrfCookie(res: Response, req?: Request): void {
+  const isProd = process.env.NODE_ENV === 'production';
+  const isIframe = req?.headers['sec-fetch-dest'] === 'iframe' || Boolean(req?.headers['x-frame-options']);
+  const sameSite = isIframe ? 'None' : (isProd ? 'Lax' : 'None');
+
   const cookieParts = [
     'resumex_csrf=',
     'Path=/',
     'Max-Age=0',
-    'SameSite=None',
+    `SameSite=${sameSite}`,
     'Secure',
   ];
   res.append('Set-Cookie', cookieParts.join('; '));
@@ -153,10 +173,8 @@ export function csrfProtection(req: Request, res: Response, next: NextFunction):
     return next();
   }
 
-  // Requests explicitly authenticated via Authorization Bearer token are immune to CSRF
-  // because browsers do not attach custom Authorization headers to cross-site requests without CORS approval
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
+  // Exempt automated unit test executions if test header is explicitly set
+  if (process.env.NODE_ENV === 'test' && req.headers['x-test-suite'] === 'true') {
     return next();
   }
 
@@ -166,9 +184,10 @@ export function csrfProtection(req: Request, res: Response, next: NextFunction):
   // If client provides CSRF token, verify it matches the cookie token
   if (!headerCsrf || !cookieCsrf || headerCsrf !== cookieCsrf) {
     res.status(403).json({
+      success: false,
       error: {
         code: 'CSRF_VALIDATION_FAILED',
-        message: 'Invalid or missing CSRF security token. Please refresh the page and try again.',
+        message: 'Invalid or missing CSRF security token. State-changing requests require valid CSRF protection.',
       },
     });
     return;
@@ -255,22 +274,27 @@ export function verifyToken(token: string): JwtTokenPayload | null {
 
 export async function requireAuth(req: AuthenticatedRequest, res: Response, next: NextFunction) {
   const token = extractToken(req);
+  const requestId = (req.headers['x-request-id'] as string) || undefined;
   if (!token) {
     return res.status(401).json({
+      success: false,
       error: {
         code: 'UNAUTHORIZED',
-        message: 'Authentication required. Please provide a valid Authorization header or session cookie.',
+        message: 'Authentication required. Active session cookie is required.',
+        requestId,
       },
     });
   }
 
   const payload = verifyToken(token);
   if (!payload) {
-    clearAuthCookie(res);
+    clearAuthCookie(res, req);
     return res.status(401).json({
+      success: false,
       error: {
         code: 'TOKEN_INVALID_OR_EXPIRED',
         message: 'Authentication token is expired or invalid.',
+        requestId,
       },
     });
   }
@@ -279,22 +303,26 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
     const tokenHash = hashToken(token);
     const isRevoked = await db.isSessionRevoked(tokenHash);
     if (isRevoked) {
-      clearAuthCookie(res);
+      clearAuthCookie(res, req);
       return res.status(401).json({
+        success: false,
         error: {
           code: 'SESSION_REVOKED',
           message: 'Your session has been signed out or revoked. Please log in again.',
+          requestId,
         },
       });
     }
 
     const user = await db.getUserById(payload.sub);
     if (!user) {
-      clearAuthCookie(res);
+      clearAuthCookie(res, req);
       return res.status(401).json({
+        success: false,
         error: {
           code: 'USER_NOT_FOUND',
-          message: 'User account associated with this token does not exist.',
+          message: 'User account associated with this session does not exist.',
+          requestId,
         },
       });
     }
@@ -306,9 +334,11 @@ export async function requireAuth(req: AuthenticatedRequest, res: Response, next
   } catch (err) {
     console.error('Auth verification error:', err);
     return res.status(500).json({
+      success: false,
       error: {
         code: 'AUTH_INTERNAL_ERROR',
         message: 'An error occurred while verifying user authorization.',
+        requestId,
       },
     });
   }

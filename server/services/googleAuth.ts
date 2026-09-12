@@ -28,32 +28,40 @@ export class GoogleAuthService {
 
     const clientId = this.configuredClientId || process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID;
 
+    // Reject if Google Auth is not configured (unless strictly in automated unit test mode)
+    if (!clientId) {
+      if (process.env.NODE_ENV === 'test') {
+        try {
+          const parts = idToken.split('.');
+          if (parts.length === 3) {
+            const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'));
+            if (payload && payload.email) {
+              return {
+                sub: payload.sub || 'test-google-sub',
+                email: payload.email.toLowerCase().trim(),
+                name: payload.name || 'Test User',
+                emailVerified: true,
+              };
+            }
+          }
+        } catch {
+          // Fall through to error
+        }
+      }
+      throw new Error('Google sign-in is not configured on this server. Please configure GOOGLE_CLIENT_ID in your environment settings.');
+    }
+
     // 1. Verify cryptographic signature & get payload
     let payload: TokenPayload | undefined;
 
     try {
       const ticket = await this.client.verifyIdToken({
         idToken,
-        audience: clientId ? [clientId] : undefined,
+        audience: clientId,
       });
       payload = ticket.getPayload();
     } catch (err: any) {
-      // In local dev sandbox without Google credentials, check for dev simulation
-      if (process.env.NODE_ENV !== 'production' && !clientId) {
-        console.warn('[GoogleAuth] VITE_GOOGLE_CLIENT_ID / GOOGLE_CLIENT_ID not set. Parsing simulated payload for dev testing.');
-        try {
-          const parts = idToken.split('.');
-          if (parts.length === 3) {
-            payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'));
-          }
-        } catch {
-          // Ignore
-        }
-      }
-
-      if (!payload) {
-        throw new Error(`Google ID token cryptographic verification failed: ${err?.message || 'Invalid signature'}`);
-      }
+      throw new Error(`Google ID token cryptographic verification failed: ${err?.message || 'Invalid signature'}`);
     }
 
     if (!payload) {
