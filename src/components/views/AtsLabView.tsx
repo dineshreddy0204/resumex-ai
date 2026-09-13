@@ -22,6 +22,8 @@ import {
   Sparkles,
   RefreshCw,
   Wrench,
+  Target,
+  Tag,
 } from 'lucide-react';
 
 interface AtsLabViewProps {
@@ -288,6 +290,152 @@ export const AtsLabView: React.FC<AtsLabViewProps> = ({
         </div>
       )}
 
+      {/* 4 Core ATS Diagnostic Scorecards */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="p-4 rounded-xl bg-white border border-[#EAE8E1] shadow-xs">
+          <div className="text-[11px] font-semibold text-[#6E6E63] uppercase tracking-wider">Overall ATS Score</div>
+          <div className="flex items-baseline gap-2 mt-1">
+            <span className="text-3xl font-black text-[#171713]">{atsResult.overallAtsScore}</span>
+            <span className="text-xs font-semibold text-[#6E6E63]">/ 100</span>
+          </div>
+          <div className="text-[11px] text-[#4F5D2F] font-medium mt-1">
+            {atsResult.overallAtsScore >= 80 ? 'Highly Parseable' : atsResult.overallAtsScore >= 60 ? 'Standard Parseability' : 'Needs Optimization'}
+          </div>
+        </div>
+
+        <div className="p-4 rounded-xl bg-white border border-[#EAE8E1] shadow-xs">
+          <div className="text-[11px] font-semibold text-[#6E6E63] uppercase tracking-wider">Keyword Coverage</div>
+          <div className="flex items-baseline gap-2 mt-1">
+            <span className="text-3xl font-black text-[#4F5D2F]">{atsResult.keywordCoverage}</span>
+            <span className="text-xs font-semibold text-[#6E6E63]">/ 100</span>
+          </div>
+          <div className="text-[11px] text-[#6E6E63] mt-1">
+            {atsResult.keywordEvidence ? `${atsResult.keywordEvidence.matchedCount} verified terms` : 'Evidence-based extraction'}
+          </div>
+        </div>
+
+        <div className="p-4 rounded-xl bg-white border border-[#EAE8E1] shadow-xs">
+          <div className="text-[11px] font-semibold text-[#6E6E63] uppercase tracking-wider">Formatting Safety</div>
+          <div className="flex items-baseline gap-2 mt-1">
+            <span className="text-3xl font-black text-[#171713]">{atsResult.formattingSafety}</span>
+            <span className="text-xs font-semibold text-[#6E6E63]">/ 100</span>
+          </div>
+          <div className="text-[11px] text-[#6E6E63] mt-1">
+            {!atsResult.fileSafety.columnsDetected && !atsResult.fileSafety.tablesDetected ? 'Single-column linear safe' : 'Layout risks detected'}
+          </div>
+        </div>
+
+        <div className="p-4 rounded-xl bg-white border border-[#EAE8E1] shadow-xs">
+          <div className="text-[11px] font-semibold text-[#6E6E63] uppercase tracking-wider">Semantic Alignment</div>
+          <div className="flex items-baseline gap-2 mt-1">
+            <span className="text-3xl font-black text-[#171713]">{atsResult.semanticAlignment}</span>
+            <span className="text-xs font-semibold text-[#6E6E63]">/ 100</span>
+          </div>
+          <div className="text-[11px] text-[#6E6E63] mt-1">
+            Structural section coherence
+          </div>
+        </div>
+      </div>
+
+      {/* Evidence-Based Keyword Coverage & Explanation Module */}
+      {atsResult.keywordEvidence && (
+        <div className="p-6 rounded-xl bg-white border border-[#EAE8E1] shadow-xs space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-[#EAE8E1] pb-3">
+            <div className="flex items-center gap-2">
+              <Target className="w-5 h-5 text-[#4F5D2F]" />
+              <div>
+                <h3 className="text-sm font-bold text-[#171713] uppercase tracking-wider">
+                  Keyword Coverage: {atsResult.keywordCoverage}%
+                </h3>
+                <p className="text-xs text-[#6E6E63] mt-0.5">
+                  {atsResult.keywordEvidence.explanation}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className={`text-[11px] font-bold px-2 py-0.5 rounded border ${
+                atsResult.keywordEvidence.stuffingRisk === 'High'
+                  ? 'bg-rose-50 text-rose-700 border-rose-200'
+                  : atsResult.keywordEvidence.stuffingRisk === 'Moderate'
+                  ? 'bg-[#C49A3A]/10 text-[#8E6D24] border-[#C49A3A]/30'
+                  : 'bg-[#4F5D2F]/10 text-[#4F5D2F] border-[#4F5D2F]/20'
+              }`}>
+                Stuffing Risk: {atsResult.keywordEvidence.stuffingRisk}
+              </span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+            {/* Matched Keywords */}
+            <div className="p-4 rounded-lg bg-[#FAF9F5] border border-[#EAE8E1] space-y-2.5">
+              <div className="flex items-center justify-between">
+                <span className="font-bold text-[#4F5D2F] flex items-center gap-1.5">
+                  <CheckCircle2 className="w-4 h-4" />
+                  Matched Terms ({atsResult.keywordEvidence.matchedTerms.length})
+                </span>
+                <span className="text-[10px] text-[#6E6E63]">Found in resume</span>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {atsResult.keywordEvidence.matchedTerms.length > 0 ? (
+                  atsResult.keywordEvidence.matchedTerms.map((term, idx) => (
+                    <span
+                      key={idx}
+                      className="px-2 py-0.5 rounded text-[11px] font-medium bg-[#4F5D2F]/10 text-[#4F5D2F] border border-[#4F5D2F]/20"
+                    >
+                      {term}
+                    </span>
+                  ))
+                ) : (
+                  <span className="text-[#6E6E63] italic">No keyword matches found.</span>
+                )}
+              </div>
+            </div>
+
+            {/* Missing Keywords */}
+            <div className="p-4 rounded-lg bg-[#FAF9F5] border border-[#EAE8E1] space-y-2.5">
+              <div className="flex items-center justify-between">
+                <span className="font-bold text-[#8E6D24] flex items-center gap-1.5">
+                  <AlertTriangle className="w-4 h-4" />
+                  Missing / Target Terms ({atsResult.keywordEvidence.missingTerms.length})
+                </span>
+                <span className="text-[10px] text-[#6E6E63]">Recommended additions</span>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {atsResult.keywordEvidence.missingTerms.length > 0 ? (
+                  atsResult.keywordEvidence.missingTerms.map((term, idx) => (
+                    <span
+                      key={idx}
+                      className="px-2 py-0.5 rounded text-[11px] font-medium bg-[#C49A3A]/10 text-[#8E6D24] border border-[#C49A3A]/20"
+                    >
+                      {term}
+                    </span>
+                  ))
+                ) : (
+                  <span className="text-[#4F5D2F] text-[11px] font-medium">All core target keywords present!</span>
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* Section Distribution Breakdown */}
+          {atsResult.keywordEvidence.sectionDistribution && atsResult.keywordEvidence.sectionDistribution.length > 0 && (
+            <div className="pt-2">
+              <div className="text-[11px] font-bold text-[#6E6E63] uppercase tracking-wider mb-2">
+                Section Keyword Distribution
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2">
+                {atsResult.keywordEvidence.sectionDistribution.map((sec, idx) => (
+                  <div key={idx} className="p-2.5 rounded-lg bg-[#FAF9F5] border border-[#EAE8E1] text-center">
+                    <div className="text-sm font-bold text-[#171713]">{sec.count}</div>
+                    <div className="text-[10px] text-[#6E6E63] truncate mt-0.5">{sec.section}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Simulation Mode Tabs */}
       <div className="bg-white rounded-xl border border-[#EAE8E1] p-2 shadow-xs">
         <div className="text-[11px] font-bold text-[#6E6E63] uppercase tracking-wider px-3 py-1.5">
@@ -336,7 +484,7 @@ export const AtsLabView: React.FC<AtsLabViewProps> = ({
               <div className="flex items-center gap-2">
                 <Cpu className="w-4 h-4 text-[#4F5D2F]" />
                 <h3 className="text-sm font-bold text-[#171713] uppercase tracking-wider">
-                  Corporate ATS Engine Parser Simulations
+                  ATS-Style Heuristic Parser Simulations
                 </h3>
               </div>
               <p className="text-xs text-[#6E6E63] mt-0.5">
@@ -344,7 +492,14 @@ export const AtsLabView: React.FC<AtsLabViewProps> = ({
               </p>
             </div>
             <span className="text-[11px] font-bold px-2 py-0.5 rounded bg-[#FAF9F5] text-[#4F5D2F] border border-[#EAE8E1] self-start sm:self-auto">
-              5 Enterprise Systems Analyzed
+              5 ATS-Style Simulations
+            </span>
+          </div>
+
+          <div className="p-3 rounded-lg bg-[#FAF9F5] border border-[#EAE8E1] text-[11px] text-[#6E6E63] flex items-start gap-2">
+            <Info className="w-4 h-4 text-[#8E6D24] shrink-0 mt-0.5" />
+            <span>
+              <strong>Educational Simulation Notice:</strong> These evaluations represent diagnostic heuristic models simulating documented parsing behaviors. They are not actual proprietary algorithms, official endorsements, or direct affiliations with Workday, Greenhouse, Taleo, Lever, or iCIMS.
             </span>
           </div>
 
@@ -359,7 +514,9 @@ export const AtsLabView: React.FC<AtsLabViewProps> = ({
                 >
                   <div>
                     <div className="flex items-center justify-between">
-                      <span className="font-bold text-sm text-[#171713]">{sim.engine}</span>
+                      <span className="font-bold text-sm text-[#171713]">
+                        {sim.simulationLabel || `${sim.engine}-style ATS simulation`}
+                      </span>
                       <span
                         className={`text-xs font-black px-2 py-0.5 rounded border ${
                           isHigh

@@ -261,7 +261,7 @@ export function getFullTemplateCatalog(): TemplateDefinition[] {
             primaryColor: pal.primary,
             fontFamily: font.font,
             headerFontFamily: font.head,
-            tags: [...base.tags, pal.name.toLowerCase()],
+            tags: [...(base.tags || []), pal.name.toLowerCase()],
           });
         }
       }

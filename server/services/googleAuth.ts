@@ -28,26 +28,8 @@ export class GoogleAuthService {
 
     const clientId = this.configuredClientId || process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID;
 
-    // Reject if Google Auth is not configured (unless strictly in automated unit test mode)
+    // Reject if Google Auth is not configured
     if (!clientId) {
-      if (process.env.NODE_ENV === 'test') {
-        try {
-          const parts = idToken.split('.');
-          if (parts.length === 3) {
-            const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'));
-            if (payload && payload.email) {
-              return {
-                sub: payload.sub || 'test-google-sub',
-                email: payload.email.toLowerCase().trim(),
-                name: payload.name || 'Test User',
-                emailVerified: true,
-              };
-            }
-          }
-        } catch {
-          // Fall through to error
-        }
-      }
       throw new Error('Google sign-in is not configured on this server. Please configure GOOGLE_CLIENT_ID in your environment settings.');
     }
 
@@ -115,3 +97,32 @@ export class GoogleAuthService {
 }
 
 export const googleAuthService = new GoogleAuthService();
+
+/**
+ * Mock Google Authentication Service for automated tests only.
+ * Provides deterministic, isolated identities without bypassing production cryptographic verifiers.
+ */
+export class MockGoogleAuthService {
+  private mockUser: ValidatedGoogleUser;
+
+  constructor(customUser?: Partial<ValidatedGoogleUser>) {
+    this.mockUser = {
+      sub: customUser?.sub || 'mock-google-sub-12345',
+      email: (customUser?.email || 'test.verified@example.com').toLowerCase().trim(),
+      name: customUser?.name || 'Test Verified User',
+      picture: customUser?.picture || 'https://lh3.googleusercontent.com/a/default',
+      emailVerified: customUser?.emailVerified !== undefined ? customUser.emailVerified : true,
+    };
+  }
+
+  public async verifyIdToken(idToken: string): Promise<ValidatedGoogleUser> {
+    if (!idToken || typeof idToken !== 'string') {
+      throw new Error('Google ID token is required and must be a valid string.');
+    }
+    if (idToken === 'invalid' || idToken === 'not-a-valid-jwt-token') {
+      throw new Error('Google ID token cryptographic verification failed: invalid token.');
+    }
+    return this.mockUser;
+  }
+}
+

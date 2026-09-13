@@ -95,7 +95,7 @@ export class ResumeTruthEngine {
     if (propDegreeMatches.length > origDegreeMatches.length) {
       violations.push({
         type: 'invented_degree',
-        claim: propDegreeMatches[0],
+        claim: propDegreeMatches[0] || 'Unknown degree',
         severity: 'BLOCKER',
         reason: 'The proposed text references an academic degree not found in the source text.',
       });

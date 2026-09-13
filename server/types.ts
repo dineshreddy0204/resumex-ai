@@ -185,8 +185,23 @@ export interface AtsSimulationResult {
     imagesIconsDetected: boolean;
     fontSafetyScore: number;
   };
+  keywordEvidence?: {
+    explanation: string;
+    matchedTerms: string[];
+    missingTerms: string[];
+    totalRelevantTerms: number;
+    matchedCount: number;
+    stuffingRisk: 'None' | 'Low' | 'Moderate' | 'High';
+    stuffingDetected: boolean;
+    extractedKeywordCount: number;
+    repeatedKeywordCount: number;
+    sectionDistribution: { section: string; count: number }[];
+    requiredSkillCoverage?: number;
+    preferredSkillCoverage?: number;
+  };
   engineSimulations?: {
     engine: 'Workday' | 'Greenhouse' | 'Taleo' | 'Lever' | 'iCIMS';
+    simulationLabel?: string;
     score: number;
     verdict: 'Excellent' | 'Good' | 'Fair' | 'Poor';
     primaryRisk: string;

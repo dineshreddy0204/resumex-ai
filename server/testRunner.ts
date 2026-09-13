@@ -243,6 +243,65 @@ Left Column Item 3          Right Column Item 3`;
     'Flags unverified claim with requires_user_confirmation = true to protect candidate truth'
   );
 
+  // --- Test Suite 13: Evidence-Based ATS Corpus Scoring & Canonical Aliases ---
+  console.log('\nTest Suite 13: Evidence-Based ATS Corpus Scoring & Canonical Aliases');
+  const testAtsEvidenceResume: ResumeData = {
+    personal_info: {
+      name: 'Evidence Candidate',
+      email: 'candidate@example.com',
+      phone: '555-9000',
+      location: 'Austin, TX',
+    },
+    summary: 'Senior Cloud Engineer proficient with microservices, Postgres databases, and K8s orchestration.',
+    skills: [{ category: 'Data & Infra', items: ['PostgreSQL', 'Kubernetes', 'Go'] }],
+    experience: [
+      {
+        id: 'exp-ev-1',
+        company: 'Cloud Corp',
+        role: 'Senior Cloud Engineer',
+        startDate: '2021',
+        endDate: '2024',
+        bullets: [
+          'Maintained high-throughput postgres clusters with zero downtime across 12 node groups.',
+          'Configured automated deployment pipelines for containerized workloads.',
+        ],
+      },
+    ],
+    education: [
+      {
+        id: 'edu-ev-1',
+        institution: 'State Tech',
+        degree: 'B.S.',
+        fieldOfStudy: 'Computer Engineering',
+        startDate: '2016',
+        endDate: '2020',
+      },
+    ],
+    projects: [],
+    certifications: [],
+    achievements: [],
+  };
+
+  const atsEvidenceResult = atsAnalyzer.analyzeAtsCompatibility(
+    testAtsEvidenceResume,
+    'Seeking a Senior Cloud Engineer with experience in PostgreSQL, Kubernetes, and Golang.'
+  );
+
+  assert(atsEvidenceResult.keywordEvidence !== undefined, 'Returns keywordEvidence breakdown');
+  assert(
+    (atsEvidenceResult.keywordEvidence?.matchedCount || 0) > 0,
+    'Matches keywords using canonical alias dictionary (e.g. Postgres -> PostgreSQL)'
+  );
+  assert(
+    atsEvidenceResult.engineSimulations !== undefined &&
+      atsEvidenceResult.engineSimulations.every((s) => s.simulationLabel && s.simulationLabel.includes('ATS simulation')),
+    'Labels vendor simulations explicitly as ATS-style heuristic models'
+  );
+  assert(
+    atsEvidenceResult.keywordEvidence?.stuffingDetected === false,
+    'Verifies natural keyword density without stuffing false positives'
+  );
+
   console.log('\n==========================================');
   console.log(`Results: ${passed} Passed, ${failed} Failed`);
   console.log('==========================================');

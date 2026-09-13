@@ -232,8 +232,8 @@ export class SemanticMatcher {
         : 'fallback';
 
     const cosineSim = this.vectorCosineSimilarity(resumeEmbeddingResult.values, jobEmbeddingResult.values);
-    // Scale cosine (-1..1, typical text embeddings 0.5..0.95) to intuitive 0..100 scale
-    const semanticMatch = Math.min(99, Math.max(10, Math.round(cosineSim * 100)));
+    // Real normalized cosine similarity mapped cleanly without artificial floors
+    const semanticMatch = Math.min(100, Math.max(0, Math.round(Math.max(0, cosineSim) * 100)));
 
     // 5. Responsibility Match
     let matchedRespCount = 0;
@@ -302,7 +302,7 @@ export class SemanticMatcher {
     return {
       jobId: job.id,
       jobTitle: job.title,
-      overallMatch: Math.min(99, Math.max(30, overallMatch)),
+      overallMatch: Math.min(100, Math.max(0, overallMatch)),
       skillMatch,
       semanticMatch,
       keywordMatch,

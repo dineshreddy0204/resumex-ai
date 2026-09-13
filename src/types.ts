@@ -11,8 +11,11 @@ export interface UserProfile {
   userId: string;
   headline?: string;
   targetRole?: string;
+  title?: string;
   experienceYears?: number;
+  yearsOfExperience?: number;
   seniorityLevel?: string;
+  location?: string;
 }
 
 export interface ExtractedProvenance {
@@ -125,8 +128,23 @@ export interface AtsSimulationResult {
     imagesIconsDetected: boolean;
     fontSafetyScore: number;
   };
+  keywordEvidence?: {
+    explanation: string;
+    matchedTerms: string[];
+    missingTerms: string[];
+    totalRelevantTerms: number;
+    matchedCount: number;
+    stuffingRisk: 'None' | 'Low' | 'Moderate' | 'High';
+    stuffingDetected: boolean;
+    extractedKeywordCount: number;
+    repeatedKeywordCount: number;
+    sectionDistribution: { section: string; count: number }[];
+    requiredSkillCoverage?: number;
+    preferredSkillCoverage?: number;
+  };
   engineSimulations?: {
     engine: 'Workday' | 'Greenhouse' | 'Taleo' | 'Lever' | 'iCIMS';
+    simulationLabel?: string;
     score: number;
     verdict: 'Excellent' | 'Good' | 'Fair' | 'Poor';
     primaryRisk: string;
@@ -138,7 +156,8 @@ export interface AtsSimulationResult {
 
 export interface AnalysisIssue {
   id: string;
-  issue_type: 'weak_bullet' | 'missing_metric' | 'overlong_sentence' | 'passive_voice' | 'missing_section';
+  issue_type: string;
+  type?: string;
   severity: 'critical' | 'high' | 'medium' | 'low';
   section: string;
   evidence: string;
@@ -267,6 +286,7 @@ export interface ResumeDocument {
   score?: ResumeScoreBreakdown;
   atsScore?: number;
   sourceText?: string;
+  rawText?: string;
   sourceMimeType?: string;
   sourceFileName?: string;
   createdAt: string;

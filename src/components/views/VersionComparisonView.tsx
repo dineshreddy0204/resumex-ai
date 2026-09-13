@@ -448,7 +448,7 @@ export const VersionComparisonView: React.FC<VersionComparisonViewProps> = ({
                 type="text"
                 placeholder="e.g. Tailored for Stripe / Backend V3"
                 value={newVersionName}
-                onChange={(e) => setNewVersionName(e.target.value)}
+                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setNewVersionName(e.target.value)}
                 className="w-full mt-1 px-3 py-2 text-xs bg-[#FAF9F5] border border-[#D5D2C7] rounded-lg text-[#171713] focus:outline-none focus:ring-1 focus:ring-[#4F5D2F]"
               >
               </input>
@@ -459,7 +459,7 @@ export const VersionComparisonView: React.FC<VersionComparisonViewProps> = ({
                 rows={3}
                 placeholder="What was modified or optimized in this revision?"
                 value={newVersionSummary}
-                onChange={(e) => setNewVersionSummary(e.target.value)}
+                onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setNewVersionSummary(e.target.value)}
                 className="w-full mt-1 px-3 py-2 text-xs bg-[#FAF9F5] border border-[#D5D2C7] rounded-lg text-[#171713] focus:outline-none focus:ring-1 focus:ring-[#4F5D2F]"
               />
             </div>

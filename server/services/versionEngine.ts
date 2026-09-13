@@ -1,4 +1,4 @@
-import type { ResumeVersion, JobDescriptionModel } from '../types';
+import type { ResumeVersion, JobDescriptionModel, ResumeData } from '../types';
 import { semanticMatcher } from './semanticMatcher';
 
 export interface VersionComparisonResult {
@@ -24,6 +24,19 @@ export class VersionEngine {
     verB: ResumeVersion,
     targetJob?: JobDescriptionModel
   ): Promise<VersionComparisonResult> {
+    const emptyResume: ResumeData = {
+      personal_info: { name: '', email: '', phone: '', location: '' },
+      summary: '',
+      skills: [],
+      experience: [],
+      education: [],
+      projects: [],
+      certifications: [],
+      achievements: [],
+    };
+    const dataA = verA.resumeData || emptyResume;
+    const dataB = verB.resumeData || emptyResume;
+
     const scoreAOverall = verA.score?.overall ?? 0;
     const scoreBOverall = verB.score?.overall ?? 0;
     const overallDelta = scoreBOverall - scoreAOverall;
@@ -32,8 +45,8 @@ export class VersionEngine {
     // Optional JD matching comparison
     let jdMatchDelta: number | undefined;
     if (targetJob) {
-      const matchA = await semanticMatcher.matchResumeToJob(verA.resumeData, targetJob);
-      const matchB = await semanticMatcher.matchResumeToJob(verB.resumeData, targetJob);
+      const matchA = await semanticMatcher.matchResumeToJob(dataA, targetJob);
+      const matchB = await semanticMatcher.matchResumeToJob(dataB, targetJob);
       jdMatchDelta = (matchB.overallMatch ?? 0) - (matchA.overallMatch ?? 0);
     }
 
@@ -78,16 +91,16 @@ export class VersionEngine {
 
     // Detect changed sections
     const changedSections: string[] = [];
-    if (JSON.stringify(verA.resumeData.summary) !== JSON.stringify(verB.resumeData.summary)) {
+    if (JSON.stringify(dataA.summary) !== JSON.stringify(dataB.summary)) {
       changedSections.push('Professional Summary');
     }
-    if (JSON.stringify(verA.resumeData.skills) !== JSON.stringify(verB.resumeData.skills)) {
+    if (JSON.stringify(dataA.skills) !== JSON.stringify(dataB.skills)) {
       changedSections.push('Technical Skills');
     }
-    if (JSON.stringify(verA.resumeData.experience) !== JSON.stringify(verB.resumeData.experience)) {
+    if (JSON.stringify(dataA.experience) !== JSON.stringify(dataB.experience)) {
       changedSections.push('Work Experience');
     }
-    if (JSON.stringify(verA.resumeData.projects) !== JSON.stringify(verB.resumeData.projects)) {
+    if (JSON.stringify(dataA.projects) !== JSON.stringify(dataB.projects)) {
       changedSections.push('Projects');
     }
 

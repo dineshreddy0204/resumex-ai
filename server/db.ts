@@ -777,8 +777,8 @@ export class DatabaseEngine {
 
   public async deleteUserAccount(userId: string): Promise<void> {
     await this.ensureInitialized();
-    await this.pgPool.query('DELETE FROM users WHERE id = $1', [userId]);
     await this.logAudit(userId, 'USER_DELETED', 'User', userId);
+    await this.pgPool.query('DELETE FROM users WHERE id = $1', [userId]);
   }
 
   public async getUserById(id: string): Promise<User | undefined> {

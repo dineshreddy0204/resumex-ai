@@ -977,13 +977,13 @@ apiRouter.post('/resumes/:id/issues/fix-safe', requireAuth, async (req: Authenti
     const safeIssues = issues.filter(
       (iss) =>
         iss.status === 'pending' &&
-        !riskyTypes.includes(iss.type) &&
+        !riskyTypes.includes(iss.type || iss.issue_type || '') &&
         !iss.requires_user_confirmation
     );
     const riskyIssues = issues.filter(
       (iss) =>
         iss.status === 'pending' &&
-        (riskyTypes.includes(iss.type) || iss.requires_user_confirmation)
+        (riskyTypes.includes(iss.type || iss.issue_type || '') || iss.requires_user_confirmation)
     );
 
     let fixedCount = 0;

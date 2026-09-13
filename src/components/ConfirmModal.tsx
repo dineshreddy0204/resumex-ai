@@ -6,9 +6,13 @@ interface ConfirmModalProps {
   title: string;
   message: string;
   confirmLabel?: string;
+  confirmText?: string;
   cancelLabel?: string;
+  cancelText?: string;
   isDestructive?: boolean;
-  onConfirm: () => void;
+  isDanger?: boolean;
+  isLoading?: boolean;
+  onConfirm: () => void | Promise<void>;
   onCancel: () => void;
 }
 
@@ -17,12 +21,20 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
   title,
   message,
   confirmLabel = 'Confirm',
+  confirmText,
   cancelLabel = 'Cancel',
+  cancelText,
   isDestructive = false,
+  isDanger = false,
+  isLoading = false,
   onConfirm,
   onCancel,
 }) => {
   if (!isOpen) return null;
+
+  const finalConfirmLabel = confirmText || confirmLabel;
+  const finalCancelLabel = cancelText || cancelLabel;
+  const isDangerous = isDestructive || isDanger;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#171713]/40 backdrop-blur-xs">
@@ -37,7 +49,7 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
         <div className="flex items-start gap-4">
           <div
             className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${
-              isDestructive ? 'bg-rose-50 text-rose-600' : 'bg-[#EEF2E6] text-[#4F5D2F]'
+              isDangerous ? 'bg-rose-50 text-rose-600' : 'bg-[#EEF2E6] text-[#4F5D2F]'
             }`}
           >
             <AlertCircle className="w-5 h-5" />
@@ -53,20 +65,22 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
           <button
             type="button"
             onClick={onCancel}
-            className="px-4 py-2 text-sm font-semibold text-[#6E6E63] hover:text-[#171713] hover:bg-[#FAF9F5] rounded-xl border border-[#E5E5DE] transition-colors"
+            disabled={isLoading}
+            className="px-4 py-2 text-sm font-semibold text-[#6E6E63] hover:text-[#171713] hover:bg-[#FAF9F5] rounded-xl border border-[#E5E5DE] transition-colors disabled:opacity-50"
           >
-            {cancelLabel}
+            {finalCancelLabel}
           </button>
           <button
             type="button"
             onClick={onConfirm}
-            className={`px-4 py-2 text-sm font-semibold rounded-xl text-white shadow-xs transition-colors ${
-              isDestructive
+            disabled={isLoading}
+            className={`px-4 py-2 text-sm font-semibold rounded-xl text-white shadow-xs transition-colors disabled:opacity-50 ${
+              isDangerous
                 ? 'bg-rose-600 hover:bg-rose-700'
                 : 'bg-[#4F5D2F] hover:bg-[#37421F]'
             }`}
           >
-            {confirmLabel}
+            {isLoading ? 'Processing...' : finalConfirmLabel}
           </button>
         </div>
       </div>
