@@ -192,96 +192,170 @@ export class AtsAnalyzer {
       });
     }
 
-    atsScore = Math.max(25, Math.min(100, atsScore));
+    atsScore = Math.max(0, Math.min(100, atsScore));
 
-    const keywordCoverage = Math.min(98, Math.max(40, 50 + totalSkills * 2.5));
-    const semanticAlignment = Math.min(96, Math.max(50, Math.round(atsScore * 0.95)));
-    const formattingSafety = columnsDetected || tablesDetected ? 82 : 98;
-    const skillRelevance = Math.min(95, Math.max(60, 65 + totalSkills * 1.5));
+    // True evidence-based scoring dimensions (natural 0-100 distribution without synthetic baselines)
+    const keywordCoverage = totalSkills === 0
+      ? 0
+      : Math.min(100, Math.round((Math.min(totalSkills, 15) / 15) * 80 + (totalSkills >= 6 ? 20 : 0)));
 
-    // 5. Deterministic ATS Engine Simulations (Workday, Greenhouse, Taleo, Lever, iCIMS)
+    const semanticAlignment = Math.min(
+      100,
+      Math.max(
+        0,
+        (hasSummary ? 20 : 0) +
+          (hasExp ? 35 : 0) +
+          (hasEdu ? 20 : 0) +
+          (totalSkills > 0 ? 15 : 0) +
+          (quantificationRatio >= 0.25 ? 10 : Math.round(quantificationRatio * 40))
+      )
+    );
+
+    const formattingSafety = Math.max(
+      0,
+      100 - (columnsDetected ? 18 : 0) - (tablesDetected ? 12 : 0) - (!machineReadable ? 45 : 0)
+    );
+
+    const categoryCount = (resumeData.skills || []).filter((g) => g.items && g.items.length > 0).length;
+    const skillRelevance = totalSkills === 0
+      ? 0
+      : Math.min(100, Math.max(0, Math.round(Math.min(50, categoryCount * 15) + Math.min(50, totalSkills * 4))));
+
+    // 5. Educational ATS-Style Heuristic Simulations
+    // NOTE: These are simulated parser heuristics for educational and testing purposes,
+    // reflecting documented parsing vulnerabilities across common corporate ATS archetypes.
+    const workdayScore = Math.max(
+      0,
+      Math.min(
+        100,
+        atsScore - (columnsDetected ? 16 : 0) - (tablesDetected ? 10 : 0) - (!hasEdu ? 10 : 0) - (!hasLocation ? 8 : 0)
+      )
+    );
+
+    const greenhouseScore = Math.max(
+      0,
+      Math.min(
+        100,
+        Math.round(
+          keywordCoverage * 0.45 +
+            skillRelevance * 0.25 +
+            (quantificationRatio >= 0.25 ? 15 : quantificationRatio * 40) +
+            (hasExp ? 15 : 0) -
+            (!hasEmail ? 15 : 0)
+        )
+      )
+    );
+
+    const taleoScore = Math.max(
+      0,
+      Math.min(
+        100,
+        atsScore - (columnsDetected ? 24 : 0) - (tablesDetected ? 20 : 0) - (!hasEmail ? 15 : 0) - (!hasExp ? 20 : 0)
+      )
+    );
+
+    const leverScore = Math.max(
+      0,
+      Math.min(
+        100,
+        Math.round(atsScore * 0.88 + (hasSummary ? 8 : 0) + (hasExp ? 4 : 0) - (!hasEmail ? 12 : 0))
+      )
+    );
+
+    const icimsScore = Math.max(
+      0,
+      Math.min(
+        100,
+        atsScore - (!hasPhone ? 15 : 0) - (!hasLocation ? 12 : 0) - (!hasEmail ? 15 : 0) - (columnsDetected ? 10 : 0)
+      )
+    );
+
     const engineSimulations: AtsSimulationResult['engineSimulations'] = [
       {
         engine: 'Workday',
-        score: Math.max(30, Math.min(100, atsScore - (columnsDetected ? 14 : 0) - (tablesDetected ? 8 : 0) - (!hasEdu ? 8 : 0))),
-        verdict: atsScore >= 85 && !columnsDetected && !tablesDetected ? 'Excellent' : atsScore >= 70 ? 'Good' : atsScore >= 50 ? 'Fair' : 'Poor',
+        score: workdayScore,
+        verdict: workdayScore >= 85 ? 'Excellent' : workdayScore >= 70 ? 'Good' : workdayScore >= 50 ? 'Fair' : 'Poor',
         primaryRisk: columnsDetected
-          ? 'Multi-column layout risks field-mapping corruption during Workday parsing.'
+          ? 'Multi-column layout risks field-mapping corruption during Workday-style hierarchical parsing.'
           : tablesDetected
-          ? 'Embedded grid tables may fail Workday linear section extraction.'
-          : 'None detected; standard single-column section flow verified.',
-        parsingModel: 'Hierarchical DOM Tokenizer with XML section schemas',
+          ? 'Embedded grid tables may fail linear section extraction.'
+          : 'Standard single-column sequential section flow verified.',
+        parsingModel: 'ATS-Style Simulation: Hierarchical DOM & XML Schema Heuristic (Workday-style)',
         strengths: [
-          hasEmail && hasPhone ? 'Complete verified primary contact identifiers' : 'Missing direct contact identifiers',
-          hasExp ? 'Clean chronological experience tree detected' : 'Missing experience entries',
-          !columnsDetected ? 'Single-column linear text order confirmed' : 'Column interleaving detected',
+          hasEmail && hasPhone ? 'Complete primary contact identifiers detected' : 'Incomplete contact details',
+          hasExp ? 'Chronological experience tree mapped' : 'Missing experience entries',
+          !columnsDetected ? 'Single-column linear text order confirmed' : 'Multi-column layout risk',
         ],
         weaknesses: [
-          ...(columnsDetected ? ['Columns detected: Workday may interlace left and right text blocks.'] : []),
-          ...(tablesDetected ? ['Tables detected: Workday XML parser may skip tabular data cells.'] : []),
-          ...(!hasLocation ? ['Missing location: Workday candidate geographic filters may exclude profile.'] : []),
+          ...(columnsDetected ? ['Multi-column layout: parser heuristic risks interleaving parallel columns.'] : []),
+          ...(tablesDetected ? ['Tables detected: XML tokenizer may drop or misalign tabular cells.'] : []),
+          ...(!hasLocation ? ['Missing location: candidate postal filter checks may exclude profile.'] : []),
         ],
       },
       {
         engine: 'Greenhouse',
-        score: Math.max(35, Math.min(100, Math.round(50 + totalSkills * 2.2 + (quantificationRatio > 0.3 ? 15 : 5) - (!hasEmail ? 12 : 0)))),
-        verdict: totalSkills >= 8 && hasExp ? 'Excellent' : totalSkills >= 5 ? 'Good' : 'Fair',
-        primaryRisk: totalSkills < 6 ? 'Low skill keyword volume reduces match percentage on Greenhouse recruiter searches.' : 'Low risk; healthy keyword density.',
-        parsingModel: 'Modern NLP Entity Indexer with Semantic Keyword Mapping',
+        score: greenhouseScore,
+        verdict: greenhouseScore >= 80 ? 'Excellent' : greenhouseScore >= 65 ? 'Good' : greenhouseScore >= 45 ? 'Fair' : 'Poor',
+        primaryRisk: totalSkills < 6
+          ? 'Low categorized skill density reduces semantic keyword matching against recruiter job requisitions.'
+          : 'Healthy keyword density and entity distribution.',
+        parsingModel: 'ATS-Style Simulation: Entity Indexer & Keyword Density Heuristic (Greenhouse-style)',
         strengths: [
           `${totalSkills} normalized technical & functional skills indexed`,
-          quantificationRatio > 0.25 ? 'High quantified outcome density across bullet points' : 'Experience statements extracted',
-          'Compatible with modern modern PDF and DOCX parsers',
+          quantificationRatio >= 0.25 ? 'High quantified outcome density across bullet points' : 'Basic bullet structure detected',
+          'Compatible with modern UTF-8 text extraction',
         ],
         weaknesses: [
-          ...(totalSkills < 6 ? ['Fewer than 6 indexed skills; expand technical and domain tooling.'] : []),
-          ...(quantificationRatio < 0.25 ? ['Fewer than 25% of bullets contain numerical outcomes or metrics.'] : []),
+          ...(totalSkills < 6 ? ['Fewer than 6 indexed skills; expand domain and tooling keywords.'] : []),
+          ...(quantificationRatio < 0.25 ? ['Under 25% of bullets contain numerical outcomes or metrics.'] : []),
         ],
       },
       {
         engine: 'Taleo',
-        score: Math.max(25, Math.min(100, atsScore - (columnsDetected ? 20 : 0) - (tablesDetected ? 15 : 0) - (!hasEmail ? 15 : 0))),
-        verdict: !columnsDetected && !tablesDetected && atsScore >= 80 ? 'Excellent' : atsScore >= 65 ? 'Good' : 'Poor',
+        score: taleoScore,
+        verdict: taleoScore >= 80 ? 'Excellent' : taleoScore >= 65 ? 'Good' : taleoScore >= 45 ? 'Fair' : 'Poor',
         primaryRisk: columnsDetected || tablesDetected
-          ? 'Taleo legacy linear stream reader scrambles multi-column resumes into unreadable text.'
-          : 'Standard header labels required for legacy Taleo section segmentation.',
-        parsingModel: 'Legacy Linear Regex Stream Engine (Oracle Taleo Enterprise Edition)',
+          ? 'Legacy linear stream readers scramble multi-column resumes and drop text within tables.'
+          : 'Standard header labels required for legacy section segmentation.',
+        parsingModel: 'ATS-Style Simulation: Linear Regex Stream Heuristic (Taleo-style)',
         strengths: [
-          hasExp ? 'Recognized standard "Work Experience" section identifier' : 'Experience missing',
+          hasExp ? 'Standard "Work Experience" section identifier recognized' : 'Experience section missing',
           hasEdu ? 'Standard "Education" header confirmed' : 'Education missing',
         ],
         weaknesses: [
-          ...(columnsDetected ? ['CRITICAL: Taleo will interleave multi-column lines in horizontal order.'] : []),
-          ...(tablesDetected ? ['CRITICAL: Taleo often fails to parse text inside table structures.'] : []),
+          ...(columnsDetected ? ['CRITICAL: Stream reader may interlace multi-column text horizontally.'] : []),
+          ...(tablesDetected ? ['CRITICAL: Legacy parser may omit content nested inside tables.'] : []),
         ],
       },
       {
         engine: 'Lever',
-        score: Math.max(30, Math.min(100, Math.round(atsScore * 0.96 + (hasSummary ? 4 : 0)))),
-        verdict: atsScore >= 80 ? 'Excellent' : atsScore >= 68 ? 'Good' : 'Fair',
-        primaryRisk: !hasExp ? 'Lever career timeline generation requires sequential role entries.' : 'Low risk.',
-        parsingModel: 'Recruiter-Centric Contextual Parser & Resume Previewer',
+        score: leverScore,
+        verdict: leverScore >= 80 ? 'Excellent' : leverScore >= 65 ? 'Good' : leverScore >= 45 ? 'Fair' : 'Poor',
+        primaryRisk: !hasExp ? 'Recruiter timeline generation requires sequential role entries.' : 'Low layout risk.',
+        parsingModel: 'ATS-Style Simulation: Contextual Recruiter Preview Heuristic (Lever-style)',
         strengths: [
-          'Direct recruiter plain-text rendering verified',
-          hasExp ? `${resumeData.experience.length} career role progressions detected` : 'No career timeline',
+          'Direct recruiter plain-text readability verified',
+          hasExp ? `${resumeData.experience.length} chronological career roles indexed` : 'No career timeline',
         ],
         weaknesses: [
-          ...(!hasSummary ? ['Professional summary absent; Lever highlights top profile abstracts.'] : []),
-          ...(!hasEmail ? ['Direct email link missing in candidate profile card.'] : []),
+          ...(!hasSummary ? ['Professional summary absent; recruiter snapshot card will omit lead intro.'] : []),
+          ...(!hasEmail ? ['Direct email link missing for recruiter quick-contact.'] : []),
         ],
       },
       {
         engine: 'iCIMS',
-        score: Math.max(30, Math.min(100, atsScore - (!hasPhone ? 10 : 0) - (!hasLocation ? 8 : 0) - (columnsDetected ? 10 : 0))),
-        verdict: hasEmail && hasPhone && hasLocation && atsScore >= 78 ? 'Excellent' : atsScore >= 65 ? 'Good' : 'Fair',
-        primaryRisk: !hasLocation || !hasPhone ? 'iCIMS strict requisition matching filters require complete geographic and direct contact anchoring.' : 'Low risk.',
-        parsingModel: 'Enterprise Contact & Requisition Matching Engine',
+        score: icimsScore,
+        verdict: icimsScore >= 80 ? 'Excellent' : icimsScore >= 65 ? 'Good' : icimsScore >= 45 ? 'Fair' : 'Poor',
+        primaryRisk: !hasLocation || !hasPhone
+          ? 'Strict candidate requisition matching filters require phone and geographic anchoring.'
+          : 'Contact anchoring verified.',
+        parsingModel: 'ATS-Style Simulation: Contact & Geographic Requisition Heuristic (iCIMS-style)',
         strengths: [
-          hasEmail ? 'Email parsed for iCIMS candidate record deduplication' : 'Missing email',
+          hasEmail ? 'Email parsed for candidate record deduplication' : 'Missing email',
           hasLocation ? `Geographic anchor recognized: "${resumeData.personal_info?.location}"` : 'Missing geographic anchor',
         ],
         weaknesses: [
-          ...(!hasPhone ? ['Missing telephone contact field required by standard iCIMS profiles.'] : []),
+          ...(!hasPhone ? ['Missing telephone contact field required by standard candidate profiles.'] : []),
           ...(!hasLocation ? ['Missing location prevents auto-matching against job postal codes.'] : []),
         ],
       },

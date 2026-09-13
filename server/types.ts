@@ -44,6 +44,7 @@ export interface ResumeData {
     id: string;
     company: string;
     role: string;
+    title?: string;
     location?: string;
     startDate: string;
     endDate: string; // or "Present"
@@ -57,6 +58,7 @@ export interface ResumeData {
     degree: string;
     fieldOfStudy?: string;
     field?: string;
+    field_of_study?: string;
     startDate: string;
     endDate: string;
     gpa?: string;

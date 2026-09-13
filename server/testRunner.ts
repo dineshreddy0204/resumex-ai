@@ -156,12 +156,101 @@ Left Column Item 3          Right Column Item 3`;
   const { MigrationRunner } = await import('./migrationRunner');
   assert(typeof MigrationRunner.runMigrations === 'function', 'MigrationRunner exposes idempotent runMigrations function');
 
+  // --- Test Suite 10: Auth Token & Password Hashing Security ---
+  console.log('\nTest Suite 10: Cookie Auth Token Security & HMAC Validation');
+  const { generateToken, verifyToken, hashPassword, verifyPassword } = await import('./auth');
+  const testUser = {
+    id: 'usr_sec_101',
+    email: 'sec@resumex.ai',
+    name: 'Security User',
+    passwordHash: 'hash',
+    emailVerified: true,
+    createdAt: new Date().toISOString(),
+  };
+  const validToken = generateToken(testUser);
+  assert(typeof validToken === 'string' && validToken.split('.').length === 3, 'Issues valid 3-part HMAC SHA-256 JWT token');
+
+  const decoded = verifyToken(validToken);
+  assert(decoded?.sub === testUser.id && decoded?.email === testUser.email, 'Cryptographically verifies authentic token');
+
+  const tamperedToken = validToken.slice(0, -5) + 'xxxxx';
+  const tamperedDecoded = verifyToken(tamperedToken);
+  assert(tamperedDecoded === null, 'Strictly rejects tampered or signature-mismatched token');
+
+  const emptyDecoded = verifyToken('');
+  assert(emptyDecoded === null, 'Rejects empty token string');
+
+  const hashedPw = await hashPassword('StrongPassword2026!');
+  const pwValid = await verifyPassword('StrongPassword2026!', hashedPw);
+  const pwInvalid = await verifyPassword('WrongPassword123', hashedPw);
+  assert(pwValid === true, 'Verifies correct password with bcrypt');
+  assert(pwInvalid === false, 'Rejects incorrect password with bcrypt');
+
+  // --- Test Suite 11: Google OIDC Token Verification & Claim Enforcement ---
+  console.log('\nTest Suite 11: Google OIDC Validation Constraints');
+  const { googleAuthService } = await import('./services/googleAuth');
+  let missingTokenError = false;
+  try {
+    await googleAuthService.verifyIdToken('');
+  } catch (err: any) {
+    missingTokenError = true;
+  }
+  assert(missingTokenError, 'Rejects empty ID token');
+
+  let malformedTokenError = false;
+  try {
+    await googleAuthService.verifyIdToken('not-a-valid-jwt-token');
+  } catch (err: any) {
+    malformedTokenError = true;
+  }
+  assert(malformedTokenError, 'Rejects malformed non-JWT token string');
+
+  // --- Test Suite 12: Zero-Fabrication AI & Optimization Engine ---
+  console.log('\nTest Suite 12: Zero-Fabrication AI & Unverified Metric Detection');
+  const { optimizationEngine } = await import('./services/optimizationEngine');
+  const testResumeWithFabricatedMetric: ResumeData = {
+    personal_info: {
+      name: 'Dev Candidate',
+      email: 'dev@example.com',
+      phone: '555-0100',
+      location: 'San Francisco, CA',
+    },
+    summary: 'Full-stack software developer',
+    skills: [{ category: 'Core', items: ['TypeScript', 'Node.js'] }],
+    experience: [
+      {
+        id: 'exp-1',
+        company: 'Startup Corp',
+        role: 'Software Developer',
+        startDate: '2023',
+        endDate: '2024',
+        bullets: ['Managed $15M revenue and increased conversions by 300% without verification.'],
+      },
+    ],
+    education: [],
+    projects: [],
+    certifications: [],
+    achievements: [],
+  };
+
+  const detectedIssues = optimizationEngine.detectAllIssues(testResumeWithFabricatedMetric);
+  const unverifiedIssue = detectedIssues.find(
+    (i) => i.type === 'unverified_claim' || i.type === 'truth_violation' || i.type === 'fabricated_metric'
+  );
+  assert(Boolean(unverifiedIssue), 'Detects unverified metric/claim requiring user verification');
+  assert(
+    unverifiedIssue?.requires_user_confirmation === true,
+    'Flags unverified claim with requires_user_confirmation = true to protect candidate truth'
+  );
+
   console.log('\n==========================================');
   console.log(`Results: ${passed} Passed, ${failed} Failed`);
   console.log('==========================================');
 
   if (failed > 0) {
     process.exit(1);
+  } else {
+    process.exit(0);
   }
 }
 

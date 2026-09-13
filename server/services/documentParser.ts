@@ -1,9 +1,24 @@
 import mammoth from 'mammoth';
 import { createRequire } from 'module';
-import { getGeminiClient, isGeminiAvailable } from '../gemini';
+import { getGeminiClient, isGeminiAvailable, getGeminiModel } from '../gemini';
 
-const require = createRequire(import.meta.url);
-const pdfParse = require('pdf-parse');
+const getRequire = () => {
+  if (typeof createRequire === 'function') {
+    try {
+      const metaUrl = typeof import.meta !== 'undefined' && import.meta?.url ? import.meta.url : `file://${process.cwd()}/`;
+      return createRequire(metaUrl);
+    } catch {
+      // Fallback
+    }
+  }
+  if (typeof require === 'function') {
+    return require;
+  }
+  return null;
+};
+
+const reqFn = getRequire();
+const pdfParse = reqFn ? reqFn('pdf-parse') : null;
 
 export interface ParsedDocumentResult {
   text: string;
@@ -262,7 +277,7 @@ export class DocumentParser {
         const client = getGeminiClient();
         if (client) {
           const resp = await client.models.generateContent({
-            model: 'gemini-2.5-flash',
+            model: getGeminiModel(),
             contents: [
               {
                 role: 'user',

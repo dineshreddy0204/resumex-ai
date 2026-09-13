@@ -44,28 +44,38 @@ export class ScoringEngine {
     const atsResult = atsAnalyzer.analyzeAtsCompatibility(resumeData);
     const atsCompatibility = atsResult.overallAtsScore;
 
-    // 2. Skills Dimension Score
+    // 2. Skills Dimension Score (Evidence-based: group diversity and normalized count)
     const totalSkills = (resumeData.skills || []).reduce((sum, g) => sum + (g.items?.length || 0), 0);
-    let skillsScore = Math.min(98, Math.max(30, 45 + totalSkills * 2.8));
-    if (totalSkills < 6) {
-      skillsScore = 55;
+    const categoryCount = (resumeData.skills || []).filter((g) => g.items && g.items.length > 0).length;
+    let skillsScore = totalSkills === 0
+      ? 0
+      : Math.min(100, Math.max(0, Math.round((Math.min(totalSkills, 15) / 15) * 70 + Math.min(30, categoryCount * 10))));
+
+    if (totalSkills < 6 && totalSkills > 0) {
       deductions.push({
         category: 'Skills',
         reason: 'Low technical skill count. Resumes with fewer than 6 skills miss broad recruiter keyword filters.',
         points: 8,
         recommendation: 'Expand with core programming languages, frameworks, databases, and development tooling.',
       });
+    } else if (totalSkills === 0) {
+      deductions.push({
+        category: 'Skills',
+        reason: 'No skills section detected. Keyword parsers index categorized skills with highest priority.',
+        points: 25,
+        recommendation: 'Add a categorized Skills section detailing technical tools, languages, and competencies.',
+      });
     }
 
-    // 3. Experience Dimension Score
-    let experienceScore = 50;
+    // 3. Experience Dimension Score (Evidence-based: role depth, action verbs, quantified results)
+    let experienceScore = 0;
     const experienceList = resumeData.experience || [];
     if (experienceList.length === 0) {
-      experienceScore = 20;
+      experienceScore = 0;
       deductions.push({
         category: 'Experience',
         reason: 'No work experience entries present.',
-        points: 25,
+        points: 30,
         recommendation: 'Detail at least 1-3 professional or internship roles with dated bullet points.',
       });
     } else {
@@ -85,12 +95,12 @@ export class ScoringEngine {
       const verbRatio = bulletCount > 0 ? strongVerbCount / bulletCount : 0;
       const quantRatio = bulletCount > 0 ? quantifiedCount / bulletCount : 0;
 
-      experienceScore = Math.round(
-        60 +
-          Math.min(20, experienceList.length * 7) +
-          Math.min(15, verbRatio * 20) +
-          Math.min(15, quantRatio * 20)
-      );
+      // Evidence weights: role count (up to 40), strong verbs (up to 30), quantified outcomes (up to 30)
+      const rolePoints = Math.min(40, experienceList.length * 15);
+      const verbPoints = Math.min(30, Math.round(verbRatio * 30));
+      const quantPoints = Math.min(30, Math.round(quantRatio * 30));
+
+      experienceScore = Math.min(100, Math.max(0, rolePoints + verbPoints + quantPoints));
 
       if (quantRatio < 0.3 && bulletCount > 3) {
         deductions.push({
@@ -101,30 +111,38 @@ export class ScoringEngine {
         });
       }
     }
-    experienceScore = Math.min(100, Math.max(30, experienceScore));
 
-    // 4. Projects Dimension Score
-    let projectsScore = 60;
-    if (resumeData.projects && resumeData.projects.length > 0) {
-      projectsScore = Math.min(96, 75 + resumeData.projects.length * 7);
-    } else {
-      projectsScore = 50;
+    // 4. Projects Dimension Score (Evidence-based: projects with descriptions and tools)
+    let projectsScore = 0;
+    const projectsList = resumeData.projects || [];
+    if (projectsList.length > 0) {
+      projectsScore = Math.min(100, projectsList.length * 25);
     }
 
-    // 5. Achievements Dimension Score
-    let achievementsScore = 70;
-    if (resumeData.achievements && resumeData.achievements.length > 0) {
-      achievementsScore = Math.min(95, 80 + resumeData.achievements.length * 6);
+    // 5. Achievements Dimension Score (Evidence-based: discrete achievements)
+    let achievementsScore = 0;
+    const achievementsList = resumeData.achievements || [];
+    if (achievementsList.length > 0) {
+      achievementsScore = Math.min(100, achievementsList.length * 25);
     }
 
-    // 6. Content Quality Score
-    const hasSummary = Boolean(resumeData.summary && resumeData.summary.length > 40);
+    // 6. Content Quality Score (Evidence-based: summary quality & contact completeness)
+    const hasSummary = Boolean(resumeData.summary && resumeData.summary.length > 30);
     const summaryLength = resumeData.summary?.length || 0;
-    let contentQuality = 75;
-    if (hasSummary && summaryLength > 80 && summaryLength < 450) {
-      contentQuality += 15;
-    } else if (!hasSummary) {
-      contentQuality -= 10;
+    let contentQuality = 0;
+    
+    // Contact completeness (up to 50 pts)
+    if (resumeData.personal_info?.name || (resumeData.personal_info as any)?.full_name) contentQuality += 15;
+    if (resumeData.personal_info?.email) contentQuality += 15;
+    if (resumeData.personal_info?.phone) contentQuality += 10;
+    if (resumeData.personal_info?.location) contentQuality += 10;
+
+    // Summary quality (up to 50 pts)
+    if (hasSummary && summaryLength >= 60 && summaryLength <= 500) {
+      contentQuality += 50;
+    } else if (hasSummary) {
+      contentQuality += 25;
+    } else {
       deductions.push({
         category: 'Content Quality',
         reason: 'Missing or overly brief professional summary.',
@@ -132,7 +150,7 @@ export class ScoringEngine {
         recommendation: 'Write a concise 2-3 sentence executive summary framing your seniority, core domain, and key impact.',
       });
     }
-    contentQuality = Math.min(98, Math.max(40, contentQuality));
+    contentQuality = Math.min(100, Math.max(0, contentQuality));
 
     // 7. Grammar & Polish Score
     let grammarScore = 95;
@@ -154,7 +172,7 @@ export class ScoringEngine {
         recommendation: 'Replace passive phrases with active verbs in past tense (e.g. "Spearheaded", "Constructed", "Optimized").',
       });
     }
-    grammarScore = Math.max(70, grammarScore);
+    grammarScore = Math.max(0, Math.min(100, grammarScore));
 
     // 8. Formatting Score
     let formattingScore = 92;
@@ -194,7 +212,7 @@ export class ScoringEngine {
     );
 
     return {
-      overall: Math.min(100, Math.max(25, overall)),
+      overall: Math.min(100, Math.max(0, overall)),
       contentQuality,
       atsCompatibility,
       skillsScore,

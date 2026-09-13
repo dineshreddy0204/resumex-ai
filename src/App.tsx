@@ -52,7 +52,8 @@ export default function App() {
 
   // Auth modal state
   const [showAuthModal, setShowAuthModal] = useState<boolean>(false);
-  const [authMode, setAuthMode] = useState<'login' | 'signup'>('login');
+  const [authMode, setAuthMode] = useState<'login' | 'signup' | 'verify' | 'forgot' | 'reset'>('login');
+  const [authModalToken, setAuthModalToken] = useState<string>('');
 
   // Global Toast notices
   const [toasts, setToasts] = useState<ToastNotice[]>([]);
@@ -83,30 +84,59 @@ export default function App() {
       const health = await api.checkHealth().catch(() => ({ status: 'ok', geminiEnabled: false }));
       setGeminiActive(health.geminiEnabled);
 
-      // 2. Auth state
-      let currentUser: User | null = null;
-      try {
-        const me = await api.getMe();
-        setUser(me.user);
-        setProfile(me.profile);
-        currentUser = me.user;
-      } catch {
-        // No active session or token expired: seamlessly initialize demo sandbox session
-        try {
-          const demo = await api.demoLogin();
-          setUser(demo.user);
-          setProfile(demo.profile);
-          currentUser = demo.user;
-        } catch (demoErr) {
-          console.error('Demo login fallback error:', demoErr);
+      // 2. Process URL parameters for Email Verification or Password Reset
+      let urlHandledUser: User | null = null;
+      if (typeof window !== 'undefined') {
+        const urlParams = new URLSearchParams(window.location.search);
+        const queryToken = urlParams.get('token');
+        const pathname = window.location.pathname;
+
+        if (queryToken && (pathname.includes('verify-email') || urlParams.get('action') === 'verify')) {
+          // Immediately sanitize URL to avoid token persistence in history/logs
+          window.history.replaceState({}, '', pathname.includes('verify-email') ? '/' : window.location.pathname);
+          try {
+            const verifyRes = await api.verifyEmail(queryToken.trim());
+            setUser(verifyRes.user);
+            setProfile(verifyRes.profile);
+            urlHandledUser = verifyRes.user;
+            showToast('success', verifyRes.message || 'Email verified successfully! Welcome to ResumeX AI.');
+          } catch (verifyErr: any) {
+            showToast('error', verifyErr.message || 'Verification link is invalid, expired, or already used.');
+          }
+        } else if (queryToken && (pathname.includes('reset-password') || urlParams.get('action') === 'reset')) {
+          window.history.replaceState({}, '', pathname.includes('reset-password') ? '/' : window.location.pathname);
+          setAuthModalToken(queryToken.trim());
+          setAuthMode('reset');
+          setShowAuthModal(true);
         }
       }
 
-      // 3. Load Templates
+      // 3. Auth state
+      let currentUser: User | null = urlHandledUser;
+      if (!currentUser) {
+        try {
+          const me = await api.getMe();
+          setUser(me.user);
+          setProfile(me.profile);
+          currentUser = me.user;
+        } catch {
+          // No active session or token expired: if demo login is enabled, attempt demo login
+          try {
+            const demo = await api.demoLogin();
+            setUser(demo.user);
+            setProfile(demo.profile);
+            currentUser = demo.user;
+          } catch {
+            // Normal guest / landing mode
+          }
+        }
+      }
+
+      // 4. Load Templates
       const tmplRes = await api.getTemplates().catch(() => ({ count: 0, templates: [] }));
       setTemplates(tmplRes.templates);
 
-      // 4. Load Resumes
+      // 5. Load Resumes
       if (currentUser) {
         await refreshResumes();
       }
@@ -620,11 +650,16 @@ export default function App() {
       <AuthModal
         isOpen={showAuthModal}
         initialMode={authMode}
-        onClose={() => setShowAuthModal(false)}
+        initialToken={authModalToken}
+        onClose={() => {
+          setShowAuthModal(false);
+          setAuthModalToken('');
+        }}
         onSuccess={(u, p) => {
           setUser(u);
           setProfile(p);
           setShowAuthModal(false);
+          setAuthModalToken('');
           refreshResumes();
           showToast('success', `Welcome, ${u.name}!`);
         }}

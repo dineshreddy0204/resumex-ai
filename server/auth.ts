@@ -33,10 +33,9 @@ export function hashToken(token: string): string {
 
 /**
  * Extract token strictly from HttpOnly session cookie (resumex_token / resumex_session).
- * In automated test runner mode (NODE_ENV === 'test'), allows Authorization header fallback.
+ * Absolute cookie-only authentication: Authorization Bearer is never accepted.
  */
 export function extractToken(req: Request): string | null {
-  // 1. HttpOnly Cookie (resumex_token or resumex_session) - Primary Production Mode
   const cookieHeader = req.headers.cookie;
   if (cookieHeader) {
     const match = cookieHeader.match(/(?:^|;\s*)(?:resumex_token|resumex_session)=([^;]+)/);
@@ -45,26 +44,27 @@ export function extractToken(req: Request): string | null {
     }
   }
 
-  // 2. Automated Test Runner Fallback ONLY (never used by frontend client)
-  if (process.env.NODE_ENV === 'test') {
-    const authHeader = req.headers.authorization;
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      return authHeader.substring(7).trim();
-    }
-  }
-
   return null;
+}
+
+/**
+ * Determine cookie security attributes based on environment
+ */
+function getCookieSecuritySettings(): { sameSite: 'Lax' | 'None'; secure: boolean } {
+  const isProd = process.env.NODE_ENV === 'production';
+  // SameSite=None is used ONLY if cross-site embedding is explicitly configured
+  const allowCrossSite = process.env.ENABLE_CROSS_SITE_IFRAME_COOKIES === 'true';
+  const sameSite: 'Lax' | 'None' = allowCrossSite ? 'None' : 'Lax';
+  const secure = isProd || allowCrossSite;
+  return { sameSite, secure };
 }
 
 /**
  * Set secure HttpOnly session cookie
  */
-export function setAuthCookie(res: Response, token: string, req?: Request): void {
+export function setAuthCookie(res: Response, token: string, _req?: Request): void {
   const maxAgeMs = 7 * 24 * 60 * 60 * 1000; // 7 days
-  const isProd = process.env.NODE_ENV === 'production';
-  // If running embedded in an iframe preview, SameSite=None is required; in standard production top-level, SameSite=Lax
-  const isIframe = req?.headers['sec-fetch-dest'] === 'iframe' || Boolean(req?.headers['x-frame-options']);
-  const sameSite = isIframe ? 'None' : (isProd ? 'Lax' : 'None');
+  const { sameSite, secure } = getCookieSecuritySettings();
 
   const cookieParts = [
     `resumex_token=${encodeURIComponent(token)}`,
@@ -72,8 +72,10 @@ export function setAuthCookie(res: Response, token: string, req?: Request): void
     `Max-Age=${Math.floor(maxAgeMs / 1000)}`,
     'HttpOnly',
     `SameSite=${sameSite}`,
-    'Secure',
   ];
+  if (secure) {
+    cookieParts.push('Secure');
+  }
   res.append('Set-Cookie', cookieParts.join('; '));
 }
 
@@ -81,9 +83,7 @@ export function setAuthCookie(res: Response, token: string, req?: Request): void
  * Clear session cookie on logout or invalidation
  */
 export function clearAuthCookie(res: Response, req?: Request): void {
-  const isProd = process.env.NODE_ENV === 'production';
-  const isIframe = req?.headers['sec-fetch-dest'] === 'iframe' || Boolean(req?.headers['x-frame-options']);
-  const sameSite = isIframe ? 'None' : (isProd ? 'Lax' : 'None');
+  const { sameSite, secure } = getCookieSecuritySettings();
 
   const cookieParts = [
     'resumex_token=',
@@ -91,8 +91,10 @@ export function clearAuthCookie(res: Response, req?: Request): void {
     'Max-Age=0',
     'HttpOnly',
     `SameSite=${sameSite}`,
-    'Secure',
   ];
+  if (secure) {
+    cookieParts.push('Secure');
+  }
   res.append('Set-Cookie', cookieParts.join('; '));
   clearCsrfCookie(res, req);
 }
@@ -107,33 +109,33 @@ export function generateCsrfToken(): string {
 /**
  * Set client-accessible CSRF cookie for Double-Submit protection
  */
-export function setCsrfCookie(res: Response, token: string, req?: Request): void {
-  const isProd = process.env.NODE_ENV === 'production';
-  const isIframe = req?.headers['sec-fetch-dest'] === 'iframe' || Boolean(req?.headers['x-frame-options']);
-  const sameSite = isIframe ? 'None' : (isProd ? 'Lax' : 'None');
+export function setCsrfCookie(res: Response, token: string, _req?: Request): void {
+  const { sameSite, secure } = getCookieSecuritySettings();
 
   const cookieParts = [
     `resumex_csrf=${encodeURIComponent(token)}`,
     'Path=/',
     'Max-Age=604800', // 7 days
     `SameSite=${sameSite}`,
-    'Secure',
   ];
+  if (secure) {
+    cookieParts.push('Secure');
+  }
   res.append('Set-Cookie', cookieParts.join('; '));
 }
 
-export function clearCsrfCookie(res: Response, req?: Request): void {
-  const isProd = process.env.NODE_ENV === 'production';
-  const isIframe = req?.headers['sec-fetch-dest'] === 'iframe' || Boolean(req?.headers['x-frame-options']);
-  const sameSite = isIframe ? 'None' : (isProd ? 'Lax' : 'None');
+export function clearCsrfCookie(res: Response, _req?: Request): void {
+  const { sameSite, secure } = getCookieSecuritySettings();
 
   const cookieParts = [
     'resumex_csrf=',
     'Path=/',
     'Max-Age=0',
     `SameSite=${sameSite}`,
-    'Secure',
   ];
+  if (secure) {
+    cookieParts.push('Secure');
+  }
   res.append('Set-Cookie', cookieParts.join('; '));
 }
 

@@ -2,7 +2,7 @@ import crypto from 'crypto';
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import multer from 'multer';
-import type { ResumeData } from './types';
+import type { ResumeData, JobDescriptionModel } from './types';
 import { db } from './db';
 import {
   generateToken,
@@ -66,6 +66,7 @@ const upload = multer({
 function sendStructuredError(res: Response, status: number, code: string, message: string) {
   const reqId = (res.getHeader('X-Request-Id') as string) || crypto.randomUUID();
   return res.status(status).json({
+    success: false,
     error: {
       code,
       message,
@@ -217,6 +218,31 @@ apiRouter.post('/auth/verify-email', authRateLimiter, async (req: Request, res: 
   }
 });
 
+// Resend verification email
+apiRouter.post('/auth/resend-verification', authRateLimiter, async (req: Request, res: Response) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return sendStructuredError(res, 400, 'MISSING_EMAIL', 'Email is required.');
+    }
+
+    const result = await db.resendVerificationToken(email);
+    if (result) {
+      const host = req.get('host') || 'localhost:3000';
+      const protocol = req.protocol === 'https' || req.get('x-forwarded-proto') === 'https' ? 'https' : 'http';
+      const verifyUrl = `${protocol}://${host}/?action=verify&token=${result.verificationToken}`;
+      await emailService.sendVerificationEmail(result.user.email, result.user.name, result.verificationToken, verifyUrl);
+    }
+
+    res.json({
+      message: 'If an unverified account with this email exists, a new verification link has been sent.',
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Failed to resend verification email.';
+    sendStructuredError(res, 500, 'RESEND_FAILED', msg);
+  }
+});
+
 // Email login
 apiRouter.post('/auth/login', authRateLimiter, async (req: Request, res: Response) => {
   try {
@@ -272,9 +298,15 @@ apiRouter.post('/auth/login', authRateLimiter, async (req: Request, res: Respons
   }
 });
 
-// Demo login (Isolated demo account Alex Rivera)
+// Demo login (Isolated demo account Alex Rivera) - Gated strictly by environment configuration
 apiRouter.post('/auth/demo-login', async (req: Request, res: Response) => {
   try {
+    const isProd = process.env.NODE_ENV === 'production';
+    const enableDemo = process.env.ENABLE_DEMO_LOGIN === 'true';
+    if (isProd || !enableDemo) {
+      return sendStructuredError(res, 403, 'DEMO_LOGIN_DISABLED', 'Demo login is disabled in this environment.');
+    }
+
     const demoUser = await db.getUserByEmail('alex.rivera.demo@resumex.ai');
     if (!demoUser) {
       return sendStructuredError(res, 500, 'DEMO_NOT_SEEDED', 'Demo user could not be loaded.');
@@ -502,7 +534,6 @@ apiRouter.get('/auth/me', requireAuth, async (req: AuthenticatedRequest, res: Re
   const user = req.user!;
   const profile = await db.getProfileByUserId(user.id);
   res.json({
-    token: req.token,
     user: {
       id: user.id,
       name: user.name,
@@ -762,6 +793,95 @@ apiRouter.post('/resumes/:id/analyze', requireAuth, async (req: AuthenticatedReq
   }
 });
 
+// Resume scoring endpoint (direct breakdown retrieval and refresh)
+apiRouter.get('/resumes/:id/score', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const resume = await db.getResume(req.user!.id, req.params.id);
+    const ats = atsAnalyzer.analyzeAtsCompatibility(resume.data);
+    const score = scoringEngine.calculateResumeScore(resume.data);
+    res.json({ score, atsScore: ats.overallAtsScore, atsBreakdown: ats });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Resume not found.';
+    sendStructuredError(res, 404, 'RESUME_NOT_FOUND', msg);
+  }
+});
+
+apiRouter.post('/resumes/:id/score', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const resume = await db.getResume(req.user!.id, req.params.id);
+    const ats = atsAnalyzer.analyzeAtsCompatibility(resume.data);
+    const score = scoringEngine.calculateResumeScore(resume.data);
+    await db.updateResumeScores(req.user!.id, resume.id, score, ats.overallAtsScore);
+    res.json({ score, atsScore: ats.overallAtsScore, atsBreakdown: ats });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Resume scoring failed.';
+    sendStructuredError(res, 400, 'SCORING_FAILED', msg);
+  }
+});
+
+// Match resume to a job description by resumeId
+apiRouter.post('/resumes/:id/match', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { jobId, rawText } = req.body;
+    const resume = await db.getResume(req.user!.id, req.params.id);
+    let job: JobDescriptionModel;
+    if (jobId) {
+      job = await db.getJobDescription(req.user!.id, jobId);
+    } else if (rawText) {
+      const parsed = jdAnalyzer.parseJobDescription(rawText);
+      job = {
+        ...parsed,
+        id: `transient-${Date.now()}`,
+        userId: req.user!.id,
+        createdAt: new Date().toISOString(),
+      };
+    } else {
+      return sendStructuredError(res, 400, 'MISSING_JOB', 'jobId or rawText is required to match.');
+    }
+
+    const match = await semanticMatcher.matchResumeToJob(resume.data, job);
+    if (jobId) {
+      await db.saveJobMatch(req.user!.id, resume.id, job.id, match);
+    }
+    res.json({ match });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Resume matching failed.';
+    sendStructuredError(res, 400, 'MATCH_FAILED', msg);
+  }
+});
+
+// Export resume by ID with verified ownership
+apiRouter.post('/resumes/:id/export', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { format = 'pdf', templateId } = req.body;
+    const resume = await db.getResume(req.user!.id, req.params.id);
+    const tmplId = templateId || resume.templateId || 'ats-classic';
+    const safeTitle = (resume.data.personal_info?.name || resume.title || 'Resume').replace(/[^a-zA-Z0-9_-]/g, '_');
+
+    if (format === 'pdf') {
+      const buffer = await exportEngine.generatePdf(resume.data, tmplId);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}_ResumeX.pdf"`);
+      return res.send(buffer);
+    } else if (format === 'docx') {
+      const buffer = await exportEngine.generateDocx(resume.data, tmplId);
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+      res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}_ResumeX.docx"`);
+      return res.send(buffer);
+    } else if (format === 'txt' || format === 'plain-text') {
+      const plainText = exportEngine.generatePlainText(resume.data);
+      return res.json({ plainText });
+    } else if (format === 'json') {
+      return res.json({ data: resume.data });
+    } else {
+      return sendStructuredError(res, 400, 'UNSUPPORTED_FORMAT', `Export format "${format}" is not supported.`);
+    }
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Resume export failed.';
+    sendStructuredError(res, 500, 'EXPORT_FAILED', msg);
+  }
+});
+
 // --- 5. OPTIMIZATION & RESUMETRUTH ENGINE ---
 apiRouter.post('/resumes/:id/optimize/bullet', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -845,7 +965,15 @@ apiRouter.post('/resumes/:id/issues/fix-safe', requireAuth, async (req: Authenti
     const issues = await db.getIssues(req.user!.id, resume.id);
 
     // Identify safe issues vs risky factual changes
-    const riskyTypes = ['truth_violation', 'fabricated_metric', 'fabricated_skill', 'missing_section', 'missing_metric'];
+    const riskyTypes = [
+      'truth_violation',
+      'fabricated_metric',
+      'fabricated_skill',
+      'unverified_claim',
+      'unverified_metric',
+      'missing_section',
+      'missing_metric',
+    ];
     const safeIssues = issues.filter(
       (iss) =>
         iss.status === 'pending' &&
@@ -1046,6 +1174,26 @@ apiRouter.post('/jobs', requireAuth, async (req: AuthenticatedRequest, res: Resp
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Job parse failed.';
     sendStructuredError(res, 400, 'SAVE_JOB_FAILED', msg);
+  }
+});
+
+apiRouter.get('/jobs/:id', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const job = await db.getJobDescription(req.user!.id, req.params.id);
+    res.json({ job });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Job description not found.';
+    sendStructuredError(res, 404, 'JOB_NOT_FOUND', msg);
+  }
+});
+
+apiRouter.delete('/jobs/:id', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    await db.deleteJobDescription(req.user!.id, req.params.id);
+    res.json({ success: true, message: 'Job description deleted successfully.' });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Failed to delete job description.';
+    sendStructuredError(res, 404, 'DELETE_JOB_FAILED', msg);
   }
 });
 

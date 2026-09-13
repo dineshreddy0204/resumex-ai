@@ -17,7 +17,8 @@ import type { User, UserProfile } from '../types';
 
 interface AuthModalProps {
   isOpen: boolean;
-  initialMode?: 'login' | 'signup';
+  initialMode?: 'login' | 'signup' | 'verify' | 'forgot' | 'reset';
+  initialToken?: string;
   onClose: () => void;
   onSuccess: (user: User, profile: UserProfile) => void;
   onTryDemo: () => void;
@@ -27,20 +28,21 @@ interface AuthModalProps {
 export const AuthModal: React.FC<AuthModalProps> = ({
   isOpen,
   initialMode = 'login',
+  initialToken = '',
   onClose,
   onSuccess,
   onTryDemo,
   showToast,
 }) => {
-  const [mode, setMode] = useState<'login' | 'signup' | 'verify' | 'forgot'>(initialMode);
+  const [mode, setMode] = useState<'login' | 'signup' | 'verify' | 'forgot' | 'reset'>(initialMode);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [agreeTerms, setAgreeTerms] = useState(true);
+  const [agreeTerms, setAgreeTerms] = useState(false);
 
-  // Verification step state
-  const [verifyToken, setVerifyToken] = useState('');
+  // Verification & reset token state
+  const [verifyToken, setVerifyToken] = useState(initialToken);
   const [verifyPromptNotice, setVerifyPromptNotice] = useState<string | null>(null);
 
   // Loading & error
@@ -100,6 +102,20 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       } else if (mode === 'forgot') {
         const res = await api.forgotPassword(email.trim());
         showToast('info', res.message);
+        setMode('login');
+      } else if (mode === 'reset') {
+        if (!verifyToken.trim()) {
+          setErrorMessage('Password reset token is required.');
+          setLoading(false);
+          return;
+        }
+        if (password.length < 8) {
+          setErrorMessage('New password must be at least 8 characters.');
+          setLoading(false);
+          return;
+        }
+        const res = await api.resetPassword(verifyToken.trim(), password);
+        showToast('success', res.message || 'Password reset successfully. Please log in.');
         setMode('login');
       }
     } catch (err: any) {
@@ -272,10 +288,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             </div>
           )}
 
-          {(mode === 'login' || mode === 'signup') && (
+          {(mode === 'login' || mode === 'signup' || mode === 'reset') && (
             <div>
               <div className="flex items-center justify-between mb-1">
-                <label className="text-xs font-medium text-[#171713]">Password</label>
+                <label className="text-xs font-medium text-[#171713]">
+                  {mode === 'reset' ? 'New Password' : 'Password'}
+                </label>
                 {mode === 'login' && (
                   <button
                     type="button"
@@ -295,10 +313,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   id="auth-password-input"
                   type={showPassword ? 'text' : 'password'}
                   required
-                  minLength={mode === 'signup' ? 8 : 1}
+                  minLength={mode === 'signup' || mode === 'reset' ? 8 : 1}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
-                  placeholder={mode === 'signup' ? 'Min. 8 characters' : '••••••••'}
+                  placeholder={mode === 'signup' || mode === 'reset' ? 'Min. 8 characters' : '••••••••'}
                   className="w-full pl-9 pr-9 py-2 text-xs rounded-lg border border-[#D5D2C7] bg-white focus:outline-none focus:ring-1 focus:ring-[#4F5D2F]"
                 />
                 <button
@@ -312,16 +330,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             </div>
           )}
 
-          {mode === 'verify' && (
+          {(mode === 'verify' || mode === 'reset') && (
             <div>
-              <label className="block text-xs font-medium text-[#171713] mb-1">Verification Token</label>
+              <label className="block text-xs font-medium text-[#171713] mb-1">
+                {mode === 'reset' ? 'Password Reset Token' : 'Verification Token'}
+              </label>
               <input
                 id="auth-verify-token-input"
                 type="text"
                 required
                 value={verifyToken}
                 onChange={(e) => setVerifyToken(e.target.value)}
-                placeholder="Paste 64-character verification token..."
+                placeholder={mode === 'reset' ? 'Paste reset token...' : 'Paste 64-character verification token...'}
                 className="w-full px-3 py-2 text-xs rounded-lg border border-[#D5D2C7] bg-white font-mono focus:outline-none focus:ring-1 focus:ring-[#4F5D2F]"
               />
             </div>
@@ -356,6 +376,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               'Create Account'
             ) : mode === 'verify' ? (
               'Confirm & Activate Account'
+            ) : mode === 'reset' ? (
+              'Reset Password & Sign In'
             ) : (
               'Send Reset Instructions'
             )}

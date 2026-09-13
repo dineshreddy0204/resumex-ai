@@ -96,12 +96,16 @@ export class DatabaseEngine {
         // 1. Run all versioned migrations cleanly
         await MigrationRunner.runMigrations(this.pgPool);
 
-        // 2. Ensure demo account exists in PostgreSQL
-        const client = await this.pgPool.connect();
-        try {
-          await this.seedDemoUser(client);
-        } finally {
-          client.release();
+        // 2. Ensure demo account exists only when enabled and not in production
+        const isProd = process.env.NODE_ENV === 'production';
+        const enableDemo = process.env.ENABLE_DEMO_LOGIN === 'true';
+        if (!isProd && enableDemo) {
+          const client = await this.pgPool.connect();
+          try {
+            await this.seedDemoUser(client);
+          } finally {
+            client.release();
+          }
         }
 
         this.isInitialized = true;
@@ -637,7 +641,30 @@ export class DatabaseEngine {
     };
   }
 
-  public async createPasswordResetToken(email: string): Promise<{ resetToken: string; expiresAt: string } | null> {
+  public async resendVerificationToken(email: string): Promise<{ verificationToken: string; user: User } | null> {
+    await this.ensureInitialized();
+    const cleanEmail = email.toLowerCase().trim();
+    const user = await this.getUserByEmail(cleanEmail);
+    if (!user || user.emailVerified) {
+      return null;
+    }
+
+    const rawVerificationToken = crypto.randomBytes(32).toString('hex');
+    const hashedToken = crypto.createHash('sha256').update(rawVerificationToken).digest('hex');
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
+    await this.pgPool.query(
+      `UPDATE users
+       SET verification_token = $1, verification_token_expires_at = $2, updated_at = NOW()
+       WHERE id = $3`,
+      [hashedToken, expiresAt, user.id]
+    );
+
+    await this.logAudit(user.id, 'VERIFICATION_RESENT', 'User', user.id);
+    return { verificationToken: rawVerificationToken, user };
+  }
+
+  public async createPasswordResetToken(email: string): Promise<{ resetToken: string; expiresAt: string; user: User } | null> {
     await this.ensureInitialized();
     const cleanEmail = email.toLowerCase().trim();
     const user = await this.getUserByEmail(cleanEmail);
@@ -659,7 +686,7 @@ export class DatabaseEngine {
 
     await this.logAudit(user.id, 'PASSWORD_RESET_REQUESTED', 'User', user.id);
 
-    return { resetToken: rawResetToken, expiresAt };
+    return { resetToken: rawResetToken, expiresAt, user };
   }
 
   public async resetPasswordWithToken(rawToken: string, newPassword: string): Promise<User> {
@@ -1533,6 +1560,17 @@ export class DatabaseEngine {
       [userId, targetRole]
     );
     return res.rows[0]?.analysis_json;
+  }
+
+  public async deleteJobDescription(userId: string, jobId: string): Promise<void> {
+    await this.ensureInitialized();
+    const res = await this.pgPool.query(
+      `DELETE FROM job_descriptions WHERE id = $1 AND user_id = $2`,
+      [jobId, userId]
+    );
+    if ((res.rowCount ?? 0) === 0) {
+      throw new Error(`Job description ${jobId} not found or unauthorized.`);
+    }
   }
 }
 
