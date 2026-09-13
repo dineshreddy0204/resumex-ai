@@ -99,6 +99,10 @@ Left Column Item 3          Right Column Item 3`;
   assert(docxBuffer instanceof Buffer, 'Generated DOCX as a binary Buffer');
   assert(docxBuffer.length > 1000, `DOCX buffer contains valid file size (${docxBuffer.length} bytes)`);
 
+  const pdfBuffer = await exportEngine.generatePdf(extracted.data, 'ats-classic');
+  assert(pdfBuffer instanceof Buffer, 'Generated PDF as a binary Buffer');
+  assert(pdfBuffer.length > 1000, `PDF buffer contains valid file size (${pdfBuffer.length} bytes)`);
+
   // --- Test Suite 5: ResumeTruth Anti-Hallucination Engine ---
   console.log('\nTest Suite 5: ResumeTruth Anti-Hallucination Verification');
   const safeRewrite = resumeTruthEngine.verifyRewrite(

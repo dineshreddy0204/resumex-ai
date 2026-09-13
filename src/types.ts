@@ -201,6 +201,7 @@ export interface JobMatchResult {
   }[];
   experienceAlignmentNote: string;
   recommendations: string[];
+  semanticSource?: 'embedding' | 'fallback';
 }
 
 export interface CareerGapAnalysis {

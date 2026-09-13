@@ -15,18 +15,10 @@ import type {
 } from '../types';
 
 class ApiClient {
-  private token: string | null = null;
   private csrfToken: string | null = null;
 
   constructor() {
-    try {
-      this.token =
-        typeof window !== 'undefined'
-          ? sessionStorage.getItem('resumex_auth_token') || localStorage.getItem('resumex_auth_token') || null
-          : null;
-    } catch {
-      this.token = null;
-    }
+    // Cookie-only architecture: session is maintained exclusively via secure HttpOnly cookies
   }
 
   private getCsrfFromCookie(): string | null {
@@ -49,27 +41,6 @@ class ApiClient {
     return '';
   }
 
-  public setToken(token: string | null) {
-    this.token = token;
-    try {
-      if (typeof window !== 'undefined') {
-        if (token) {
-          sessionStorage.setItem('resumex_auth_token', token);
-          localStorage.setItem('resumex_auth_token', token);
-        } else {
-          sessionStorage.removeItem('resumex_auth_token');
-          localStorage.removeItem('resumex_auth_token');
-        }
-      }
-    } catch {
-      // Ignore storage access errors
-    }
-  }
-
-  public getToken(): string | null {
-    return this.token;
-  }
-
   private async request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
     const headers = new Headers(options.headers || {});
     if (!headers.has('Content-Type') && !(options.body instanceof FormData)) {
@@ -83,10 +54,6 @@ class ApiClient {
       if (csrf) {
         headers.set('X-CSRF-Token', csrf);
       }
-    }
-
-    if (this.token) {
-      headers.set('Authorization', `Bearer ${this.token}`);
     }
 
     const response = await fetch(`/api${endpoint}`, {
@@ -108,21 +75,17 @@ class ApiClient {
   }
 
   // --- Auth ---
-  public async demoLogin(): Promise<{ user: User; profile: UserProfile; token?: string }> {
-    const data = await this.request<{ user: User; profile: UserProfile; token?: string }>('/auth/demo-login', {
+  public async demoLogin(): Promise<{ user: User; profile: UserProfile }> {
+    return this.request<{ user: User; profile: UserProfile }>('/auth/demo-login', {
       method: 'POST',
     });
-    if (data.token) this.setToken(data.token);
-    return data;
   }
 
-  public async login(email: string, password: string): Promise<{ user: User; profile: UserProfile; token?: string }> {
-    const data = await this.request<{ user: User; profile: UserProfile; token?: string }>('/auth/login', {
+  public async login(email: string, password: string): Promise<{ user: User; profile: UserProfile }> {
+    return this.request<{ user: User; profile: UserProfile }>('/auth/login', {
       method: 'POST',
       body: JSON.stringify({ email, password }),
     });
-    if (data.token) this.setToken(data.token);
-    return data;
   }
 
   public async signup(
@@ -132,15 +95,13 @@ class ApiClient {
   ): Promise<{
     user: User;
     profile?: UserProfile;
-    token?: string;
     requiresVerification?: boolean;
     message?: string;
     devVerificationUrl?: string;
   }> {
-    const data = await this.request<{
+    return this.request<{
       user: User;
       profile?: UserProfile;
-      token?: string;
       requiresVerification?: boolean;
       message?: string;
       devVerificationUrl?: string;
@@ -148,28 +109,20 @@ class ApiClient {
       method: 'POST',
       body: JSON.stringify({ name, email, password }),
     });
-    if (data.token) {
-      this.setToken(data.token);
-    }
-    return data;
   }
 
-  public async verifyEmail(token: string): Promise<{ user: User; profile: UserProfile; token?: string }> {
-    const data = await this.request<{ user: User; profile: UserProfile; token?: string }>('/auth/verify-email', {
+  public async verifyEmail(token: string): Promise<{ user: User; profile: UserProfile; message?: string }> {
+    return this.request<{ user: User; profile: UserProfile; message?: string }>('/auth/verify-email', {
       method: 'POST',
       body: JSON.stringify({ token }),
     });
-    if (data.token) this.setToken(data.token);
-    return data;
   }
 
-  public async googleAuth(idToken: string): Promise<{ user: User; profile: UserProfile; token?: string }> {
-    const data = await this.request<{ user: User; profile: UserProfile; token?: string }>('/auth/google', {
+  public async googleAuth(idToken: string): Promise<{ user: User; profile: UserProfile }> {
+    return this.request<{ user: User; profile: UserProfile }>('/auth/google', {
       method: 'POST',
       body: JSON.stringify({ idToken, credential: idToken }),
     });
-    if (data.token) this.setToken(data.token);
-    return data;
   }
 
   public async forgotPassword(email: string): Promise<{ message: string; resetToken?: string; expiresAt?: string }> {
@@ -190,7 +143,7 @@ class ApiClient {
     const res = await this.request<{ success: boolean; message: string }>('/auth/delete-account', {
       method: 'DELETE',
     });
-    this.logout();
+    await this.logout();
     return res;
   }
 
@@ -208,12 +161,8 @@ class ApiClient {
     });
   }
 
-  public async getMe(): Promise<{ user: User; profile: UserProfile; token?: string }> {
-    const data = await this.request<{ user: User; profile: UserProfile; token?: string }>('/auth/me');
-    if (data.token) {
-      this.setToken(data.token);
-    }
-    return data;
+  public async getMe(): Promise<{ user: User; profile: UserProfile }> {
+    return this.request<{ user: User; profile: UserProfile }>('/auth/me');
   }
 
   public async logout(): Promise<void> {
@@ -221,8 +170,6 @@ class ApiClient {
       await this.request('/auth/logout', { method: 'POST' });
     } catch {
       // Ignore network errors on logout
-    } finally {
-      this.setToken(null);
     }
   }
 
@@ -475,17 +422,42 @@ class ApiClient {
   public async exportDocx(data: any, templateId?: string): Promise<Blob> {
     const headers = new Headers();
     headers.set('Content-Type', 'application/json');
-    if (this.token) {
-      headers.set('Authorization', `Bearer ${this.token}`);
+    const csrf = this.getCsrfFromCookie() || this.csrfToken;
+    if (csrf) {
+      headers.set('X-CSRF-Token', csrf);
     }
     const response = await fetch('/api/exports/docx', {
       method: 'POST',
-      credentials: 'same-origin',
+      credentials: 'include',
       headers,
       body: JSON.stringify({ data, templateId }),
     });
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({ error: 'DOCX export failed' }));
+      const message =
+        errorData && errorData.error && typeof errorData.error === 'object'
+          ? errorData.error.message
+          : errorData.error || `HTTP ${response.status}: ${response.statusText}`;
+      throw new Error(message);
+    }
+    return response.blob();
+  }
+
+  public async exportPdf(data: any, templateId?: string): Promise<Blob> {
+    const headers = new Headers();
+    headers.set('Content-Type', 'application/json');
+    const csrf = this.getCsrfFromCookie() || this.csrfToken;
+    if (csrf) {
+      headers.set('X-CSRF-Token', csrf);
+    }
+    const response = await fetch('/api/exports/pdf', {
+      method: 'POST',
+      credentials: 'include',
+      headers,
+      body: JSON.stringify({ data, templateId }),
+    });
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: 'PDF export failed' }));
       const message =
         errorData && errorData.error && typeof errorData.error === 'object'
           ? errorData.error.message

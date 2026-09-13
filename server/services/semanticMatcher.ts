@@ -1,6 +1,6 @@
 import type { ResumeData, JobDescriptionModel, JobMatchResult } from '../types';
 import { skillExtractor } from './skillExtractor';
-import { getGeminiClient, isGeminiAvailable } from '../gemini';
+import { getGeminiClient, isGeminiAvailable, getGeminiEmbeddingModel } from '../gemini';
 
 /**
  * =========================================================================
@@ -46,23 +46,23 @@ export class SemanticMatcher {
 
   /**
    * Generates a 3072-dimensional vector embedding for the supplied text.
-   * Uses Gemini 'gemini-embedding-2-preview' when active, falling back to
+   * Uses Gemini embedding model when active, falling back to
    * dense deterministic hash-projection vectors if offline.
    */
-  public async getEmbedding(text: string): Promise<number[]> {
+  public async getEmbeddingWithSource(text: string): Promise<{ values: number[]; source: 'embedding' | 'fallback' }> {
     const cleanText = text.trim().slice(0, 2048);
-    if (!cleanText) return new Array(128).fill(0);
+    if (!cleanText) return { values: new Array(128).fill(0), source: 'fallback' };
 
     if (isGeminiAvailable()) {
       try {
         const client = getGeminiClient();
         if (client) {
           const res = await client.models.embedContent({
-            model: 'gemini-embedding-2-preview',
+            model: getGeminiEmbeddingModel(),
             contents: cleanText,
           });
           if (res.embeddings && res.embeddings.length > 0 && res.embeddings[0].values) {
-            return res.embeddings[0].values;
+            return { values: res.embeddings[0].values, source: 'embedding' };
           }
         }
       } catch (err) {
@@ -71,7 +71,12 @@ export class SemanticMatcher {
     }
 
     // Deterministic dense vector fallback (256-dim feature projection)
-    return this.generateDenseProjection(cleanText);
+    return { values: this.generateDenseProjection(cleanText), source: 'fallback' };
+  }
+
+  public async getEmbedding(text: string): Promise<number[]> {
+    const res = await this.getEmbeddingWithSource(text);
+    return res.values;
   }
 
   /**
@@ -216,14 +221,19 @@ export class SemanticMatcher {
       (job.requiredSkills || []).join(', '),
     ].join(' ');
 
-    const [resumeVector, jobVector] = await Promise.all([
-      this.getEmbedding(resumeEmbeddingText),
-      this.getEmbedding(jobEmbeddingText),
+    const [resumeEmbeddingResult, jobEmbeddingResult] = await Promise.all([
+      this.getEmbeddingWithSource(resumeEmbeddingText),
+      this.getEmbeddingWithSource(jobEmbeddingText),
     ]);
 
-    const cosineSim = this.vectorCosineSimilarity(resumeVector, jobVector);
+    const semanticSource: 'embedding' | 'fallback' =
+      resumeEmbeddingResult.source === 'embedding' && jobEmbeddingResult.source === 'embedding'
+        ? 'embedding'
+        : 'fallback';
+
+    const cosineSim = this.vectorCosineSimilarity(resumeEmbeddingResult.values, jobEmbeddingResult.values);
     // Scale cosine (-1..1, typical text embeddings 0.5..0.95) to intuitive 0..100 scale
-    const semanticMatch = Math.min(98, Math.max(45, Math.round(cosineSim * 100)));
+    const semanticMatch = Math.min(99, Math.max(10, Math.round(cosineSim * 100)));
 
     // 5. Responsibility Match
     let matchedRespCount = 0;
@@ -303,6 +313,7 @@ export class SemanticMatcher {
       missingSkills,
       experienceAlignmentNote,
       recommendations,
+      semanticSource,
     };
   }
 

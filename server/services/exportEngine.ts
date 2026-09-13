@@ -1,6 +1,7 @@
 import type { ResumeData } from '../types';
 import { atsAnalyzer } from './atsAnalyzer';
 import { MASTER_TEMPLATES } from './templateEngine';
+import { jsPDF } from 'jspdf';
 import {
   Document,
   Packer,
@@ -565,6 +566,204 @@ export class ExportEngine {
     });
 
     return await Packer.toBuffer(doc);
+  }
+
+  /**
+   * Generates a fully-styled, professional PDF matching
+   * the user's selected resume template typography, colors, and layout structure.
+   */
+  public async generatePdf(data: ResumeData, templateId: string = 'ats-classic'): Promise<Buffer> {
+    const template = MASTER_TEMPLATES.find((t) => t.id === templateId) || MASTER_TEMPLATES[0];
+    const doc = new jsPDF({
+      orientation: 'portrait',
+      unit: 'pt',
+      format: 'letter',
+    });
+
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const margin = 36; // 0.5 inch in pt
+    const contentWidth = pageWidth - margin * 2;
+    let cursorY = margin;
+
+    const checkPageBreak = (neededHeight: number) => {
+      if (cursorY + neededHeight > pageHeight - margin) {
+        doc.addPage();
+        cursorY = margin;
+      }
+    };
+
+    const hexToRgb = (hex: string): [number, number, number] => {
+      const clean = hex.replace('#', '');
+      const num = parseInt(clean, 16);
+      return [(num >> 16) & 255, (num >> 8) & 255, num & 255];
+    };
+
+    const primaryRgb = hexToRgb(template.primaryColor || '#0f172a');
+    const secondaryRgb = hexToRgb(template.secondaryColor || '#475569');
+    const accentRgb = hexToRgb(template.accentColor || '#0284c7');
+
+    const fontName = template.fontFamily?.includes('serif')
+      ? 'times'
+      : template.fontFamily?.includes('mono')
+      ? 'courier'
+      : 'helvetica';
+
+    // 1. Header Name
+    doc.setFont(fontName, 'bold');
+    doc.setFontSize(18);
+    doc.setTextColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
+    const name = data.personal_info?.name || 'Candidate Name';
+    if (template.headerStyle === 'centered') {
+      doc.text(name, pageWidth / 2, cursorY, { align: 'center' });
+    } else {
+      doc.text(name, margin, cursorY);
+    }
+    cursorY += 20;
+
+    // 2. Contact details
+    const contactParts: string[] = [];
+    if (data.personal_info?.email) contactParts.push(data.personal_info.email);
+    if (data.personal_info?.phone) contactParts.push(data.personal_info.phone);
+    if (data.personal_info?.location) contactParts.push(data.personal_info.location);
+    if (data.personal_info?.linkedin) contactParts.push(data.personal_info.linkedin);
+    if (data.personal_info?.github) contactParts.push(data.personal_info.github);
+
+    if (contactParts.length > 0) {
+      doc.setFont(fontName, 'normal');
+      doc.setFontSize(9);
+      doc.setTextColor(secondaryRgb[0], secondaryRgb[1], secondaryRgb[2]);
+      const contactLine = contactParts.join('  •  ');
+      if (template.headerStyle === 'centered') {
+        doc.text(contactLine, pageWidth / 2, cursorY, { align: 'center' });
+      } else {
+        doc.text(contactLine, margin, cursorY);
+      }
+      cursorY += 16;
+    }
+
+    const renderSectionHeader = (title: string) => {
+      checkPageBreak(30);
+      cursorY += 8;
+      doc.setFont(fontName, 'bold');
+      doc.setFontSize(11);
+      doc.setTextColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
+      doc.text(title.toUpperCase(), margin, cursorY);
+      cursorY += 4;
+      doc.setDrawColor(accentRgb[0], accentRgb[1], accentRgb[2]);
+      doc.setLineWidth(1);
+      doc.line(margin, cursorY, pageWidth - margin, cursorY);
+      cursorY += 14;
+    };
+
+    // Summary
+    if (data.summary && data.summary.trim()) {
+      renderSectionHeader('Professional Summary');
+      doc.setFont(fontName, 'normal');
+      doc.setFontSize(9.5);
+      doc.setTextColor(30, 41, 59);
+      const splitSummary = doc.splitTextToSize(data.summary, contentWidth);
+      checkPageBreak(splitSummary.length * 13);
+      doc.text(splitSummary, margin, cursorY);
+      cursorY += splitSummary.length * 13 + 6;
+    }
+
+    // Skills
+    if (data.skills && data.skills.length > 0) {
+      renderSectionHeader('Technical Skills');
+      for (const skillGroup of data.skills) {
+        if (!skillGroup.items || skillGroup.items.length === 0) continue;
+        checkPageBreak(16);
+        doc.setFont(fontName, 'bold');
+        doc.setFontSize(9);
+        doc.setTextColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
+        const catText = `${skillGroup.category}: `;
+        doc.text(catText, margin, cursorY);
+        const catWidth = doc.getTextWidth(catText);
+
+        doc.setFont(fontName, 'normal');
+        doc.setTextColor(50, 50, 50);
+        const itemsText = skillGroup.items.join(', ');
+        const splitItems = doc.splitTextToSize(itemsText, contentWidth - catWidth);
+        doc.text(splitItems, margin + catWidth, cursorY);
+        cursorY += splitItems.length * 12 + 2;
+      }
+    }
+
+    // Experience
+    if (data.experience && data.experience.length > 0) {
+      renderSectionHeader('Work Experience');
+      for (const exp of data.experience) {
+        checkPageBreak(30);
+        doc.setFont(fontName, 'bold');
+        doc.setFontSize(10);
+        doc.setTextColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
+        doc.text(exp.role || 'Role', margin, cursorY);
+
+        const dateRange = [exp.startDate, exp.endDate].filter(Boolean).join(' – ');
+        if (dateRange) {
+          doc.setFont(fontName, 'italic');
+          doc.setFontSize(9);
+          doc.setTextColor(secondaryRgb[0], secondaryRgb[1], secondaryRgb[2]);
+          doc.text(dateRange, pageWidth - margin, cursorY, { align: 'right' });
+        }
+        cursorY += 13;
+
+        if (exp.company) {
+          doc.setFont(fontName, 'normal');
+          doc.setFontSize(9.5);
+          doc.setTextColor(secondaryRgb[0], secondaryRgb[1], secondaryRgb[2]);
+          const compLoc = [exp.company, exp.location].filter(Boolean).join('  •  ');
+          doc.text(compLoc, margin, cursorY);
+          cursorY += 13;
+        }
+
+        for (const bullet of exp.bullets || []) {
+          doc.setFont(fontName, 'normal');
+          doc.setFontSize(9);
+          doc.setTextColor(40, 40, 40);
+          const splitBullet = doc.splitTextToSize(bullet, contentWidth - 14);
+          checkPageBreak(splitBullet.length * 12 + 4);
+          doc.text('•', margin + 2, cursorY);
+          doc.text(splitBullet, margin + 12, cursorY);
+          cursorY += splitBullet.length * 12 + 3;
+        }
+        cursorY += 6;
+      }
+    }
+
+    // Education
+    if (data.education && data.education.length > 0) {
+      renderSectionHeader('Education');
+      for (const edu of data.education) {
+        checkPageBreak(24);
+        doc.setFont(fontName, 'bold');
+        doc.setFontSize(9.5);
+        doc.setTextColor(primaryRgb[0], primaryRgb[1], primaryRgb[2]);
+        doc.text(edu.degree || 'Degree', margin, cursorY);
+
+        const eduDates = [edu.startDate, edu.endDate].filter(Boolean).join(' – ');
+        if (eduDates) {
+          doc.setFont(fontName, 'italic');
+          doc.setFontSize(8.5);
+          doc.setTextColor(secondaryRgb[0], secondaryRgb[1], secondaryRgb[2]);
+          doc.text(eduDates, pageWidth - margin, cursorY, { align: 'right' });
+        }
+        cursorY += 12;
+
+        if (edu.institution) {
+          doc.setFont(fontName, 'normal');
+          doc.setFontSize(9);
+          doc.setTextColor(secondaryRgb[0], secondaryRgb[1], secondaryRgb[2]);
+          const line = [edu.institution, edu.fieldOfStudy, edu.gpa ? `GPA: ${edu.gpa}` : ''].filter(Boolean).join('  •  ');
+          doc.text(line, margin, cursorY);
+          cursorY += 12;
+        }
+      }
+    }
+
+    const arrayBuffer = doc.output('arraybuffer');
+    return Buffer.from(arrayBuffer);
   }
 }
 

@@ -196,14 +196,13 @@ apiRouter.post('/auth/verify-email', authRateLimiter, async (req: Request, res: 
     const ua = (req.headers['user-agent'] || 'unknown') as string;
 
     await db.createSession(verifiedUser.id, tokenHash, ip, ua);
-    setAuthCookie(res, authToken);
-    setCsrfCookie(res, generateCsrfToken());
+    setAuthCookie(res, authToken, req);
+    setCsrfCookie(res, generateCsrfToken(), req);
 
     const profile = await db.getProfileByUserId(verifiedUser.id);
 
     res.json({
       message: 'Email successfully verified! Your account is now active.',
-      token: authToken,
       user: {
         id: verifiedUser.id,
         name: verifiedUser.name,
@@ -252,13 +251,12 @@ apiRouter.post('/auth/login', authRateLimiter, async (req: Request, res: Respons
     const ua = (req.headers['user-agent'] || 'unknown') as string;
 
     await db.createSession(user.id, tokenHash, ip, ua);
-    setAuthCookie(res, token);
-    setCsrfCookie(res, generateCsrfToken());
+    setAuthCookie(res, token, req);
+    setCsrfCookie(res, generateCsrfToken(), req);
 
     const profile = await db.getProfileByUserId(user.id);
 
     res.json({
-      token,
       user: {
         id: user.id,
         name: user.name,
@@ -288,13 +286,12 @@ apiRouter.post('/auth/demo-login', async (req: Request, res: Response) => {
     const ua = (req.headers['user-agent'] || 'unknown') as string;
 
     await db.createSession(demoUser.id, tokenHash, ip, ua);
-    setAuthCookie(res, token);
-    setCsrfCookie(res, generateCsrfToken());
+    setAuthCookie(res, token, req);
+    setCsrfCookie(res, generateCsrfToken(), req);
 
     const profile = await db.getProfileByUserId(demoUser.id);
 
     res.json({
-      token,
       user: {
         id: demoUser.id,
         name: demoUser.name,
@@ -342,13 +339,12 @@ apiRouter.post('/auth/google', authRateLimiter, async (req: Request, res: Respon
     const ua = (req.headers['user-agent'] || 'unknown') as string;
 
     await db.createSession(user.id, tokenHash, ip, ua);
-    setAuthCookie(res, token);
-    setCsrfCookie(res, generateCsrfToken());
+    setAuthCookie(res, token, req);
+    setCsrfCookie(res, generateCsrfToken(), req);
 
     const profile = await db.getProfileByUserId(user.id);
 
     res.json({
-      token,
       user: {
         id: user.id,
         name: user.name,
@@ -373,7 +369,7 @@ apiRouter.post('/auth/logout', requireAuth, async (req: AuthenticatedRequest, re
         [req.tokenHash]
       );
     }
-    clearAuthCookie(res);
+    clearAuthCookie(res, req);
     await db.logAudit(req.user!.id, 'USER_LOGOUT', 'User', req.user!.id);
     res.json({ success: true, message: 'Logged out successfully.' });
   } catch (err: unknown) {
@@ -1138,6 +1134,25 @@ apiRouter.post('/exports/docx', requireAuth, async (req: AuthenticatedRequest, r
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'DOCX export generation failed.';
     sendStructuredError(res, 500, 'DOCX_EXPORT_FAILED', msg);
+  }
+});
+
+apiRouter.post('/exports/pdf', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { data, templateId } = req.body;
+    if (!data) {
+      return sendStructuredError(res, 400, 'MISSING_DATA', 'Resume data is required for PDF export.');
+    }
+
+    const buffer = await exportEngine.generatePdf(data, templateId || 'ats-classic');
+    const safeTitle = (data.personal_info?.name || 'Resume').replace(/[^a-zA-Z0-9_-]/g, '_');
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${safeTitle}_ResumeX.pdf"`);
+    res.send(buffer);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'PDF export generation failed.';
+    sendStructuredError(res, 500, 'PDF_EXPORT_FAILED', msg);
   }
 });
 
