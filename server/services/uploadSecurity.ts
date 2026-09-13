@@ -9,7 +9,138 @@ export interface UploadValidationResult {
 }
 
 export class UploadSecurity {
-  private static readonly MAX_SIZE_BYTES = 15 * 1024 * 1024; // 15MB
+  private static readonly MAX_SIZE_BYTES = 10 * 1024 * 1024; // 10MB strict limit
+
+  /**
+   * Validates ZIP archive headers inside DOCX files:
+   * - Enforces PK\x03\x04 signature
+   * - Verifies presence of [Content_Types].xml and word/document.xml
+   * - Rejects path traversal sequences (../) in archive entries
+   * - Rejects zip bombs (ratio > 50:1 or total uncompressed > 50MB)
+   * - Rejects executable payloads or macro scripts (e.g. vbaProject.bin)
+   */
+  private static validateDocxArchive(buffer: Buffer): { isValid: boolean; error?: string } {
+    if (
+      buffer.length < 4 ||
+      buffer[0] !== 0x50 ||
+      buffer[1] !== 0x4b ||
+      buffer[2] !== 0x03 ||
+      buffer[3] !== 0x04
+    ) {
+      return {
+        isValid: false,
+        error: 'Corrupt or spoofed file: The Word document does not match standard DOCX/ZIP archive signatures (PK\x03\x04).',
+      };
+    }
+
+    let offset = 0;
+    let totalUncompressedSize = 0;
+    let hasContentTypes = false;
+    let hasWordDocument = false;
+    const MAX_UNCOMPRESSED_TOTAL = 50 * 1024 * 1024; // 50MB uncompressed limit
+    const dangerousExtensions = [
+      '.exe', '.dll', '.bat', '.cmd', '.sh', '.vbs', '.js', '.scr', '.jar', '.com', '.pif'
+    ];
+
+    while (offset + 30 <= buffer.length) {
+      if (
+        buffer[offset] === 0x50 &&
+        buffer[offset + 1] === 0x4b &&
+        buffer[offset + 2] === 0x03 &&
+        buffer[offset + 3] === 0x04
+      ) {
+        const compressedSize = buffer.readUInt32LE(offset + 18);
+        const uncompressedSize = buffer.readUInt32LE(offset + 22);
+        const fileNameLength = buffer.readUInt16LE(offset + 26);
+        const extraFieldLength = buffer.readUInt16LE(offset + 28);
+
+        const fileNameStart = offset + 30;
+        const fileNameEnd = fileNameStart + fileNameLength;
+
+        if (fileNameEnd > buffer.length) break;
+
+        const entryName = buffer.subarray(fileNameStart, fileNameEnd).toString('utf8');
+        const lowerEntry = entryName.toLowerCase();
+
+        // 1. Path traversal rejection
+        if (entryName.includes('..') || entryName.startsWith('/') || entryName.startsWith('\\')) {
+          return {
+            isValid: false,
+            error: `Malicious archive structure detected: Path traversal in entry "${entryName}".`,
+          };
+        }
+
+        // 2. Suspicious macros / scripts rejection
+        if (lowerEntry.includes('vbaproject.bin') || lowerEntry.includes('vba') || lowerEntry.endsWith('.bin')) {
+          return {
+            isValid: false,
+            error: 'Suspicious macro or binary payload detected in DOCX archive.',
+          };
+        }
+
+        // 3. Executable payload rejection
+        for (const badExt of dangerousExtensions) {
+          if (lowerEntry.endsWith(badExt)) {
+            return {
+              isValid: false,
+              error: `Malicious executable file "${entryName}" detected within document archive.`,
+            };
+          }
+        }
+
+        // 4. Zip bomb detection
+        totalUncompressedSize += uncompressedSize;
+        if (totalUncompressedSize > MAX_UNCOMPRESSED_TOTAL) {
+          return {
+            isValid: false,
+            error: 'Zip bomb detected: Uncompressed content exceeds maximum allowed size (50MB).',
+          };
+        }
+
+        if (uncompressedSize > 1024 * 1024 && compressedSize > 0) {
+          const ratio = uncompressedSize / compressedSize;
+          if (ratio > 50) {
+            return {
+              isValid: false,
+              error: 'Zip bomb detected: Abnormal compression ratio in archive entry.',
+            };
+          }
+        }
+
+        if (entryName === '[Content_Types].xml' || entryName.endsWith('/[Content_Types].xml')) {
+          hasContentTypes = true;
+        }
+        if (entryName === 'word/document.xml' || entryName.endsWith('word/document.xml')) {
+          hasWordDocument = true;
+        }
+
+        const nextOffset = fileNameEnd + extraFieldLength + compressedSize;
+        if (nextOffset <= offset) {
+          offset++;
+        } else {
+          offset = nextOffset;
+        }
+      } else {
+        offset++;
+      }
+    }
+
+    if (!hasContentTypes) {
+      return {
+        isValid: false,
+        error: 'Invalid DOCX structure: Missing required OpenXML [Content_Types].xml definitions.',
+      };
+    }
+
+    if (!hasWordDocument) {
+      return {
+        isValid: false,
+        error: 'Invalid DOCX structure: Missing required OpenXML word/document.xml content.',
+      };
+    }
+
+    return { isValid: true };
+  }
 
   /**
    * Sanitizes a user-provided file name:
@@ -110,30 +241,13 @@ export class UploadSecurity {
 
     // DOCX Magic Bytes: PK\x03\x04 (0x50, 0x4B, 0x03, 0x04) ZIP signature + document verification
     if (ext === '.docx' || mimeType.includes('wordprocessingml') || mimeType.includes('officedocument')) {
-      if (
-        buffer.length < 4 ||
-        buffer[0] !== 0x50 ||
-        buffer[1] !== 0x4b ||
-        buffer[2] !== 0x03 ||
-        buffer[3] !== 0x04
-      ) {
+      const docxCheck = this.validateDocxArchive(buffer);
+      if (!docxCheck.isValid) {
         return {
           isValid: false,
           sanitizedFileName,
           detectedFormat: 'docx',
-          error: 'Corrupt or spoofed file: The Word document does not match standard DOCX/ZIP archive signatures.',
-        };
-      }
-
-      // Check for Word document content string or [Content_Types].xml in raw zip bytes
-      const zipString = buffer.toString('latin1');
-      const hasContentTypes = zipString.includes('[Content_Types].xml') || zipString.includes('word/');
-      if (!hasContentTypes) {
-        return {
-          isValid: false,
-          sanitizedFileName,
-          detectedFormat: 'docx',
-          error: 'Invalid DOCX structure: Missing required OpenXML document definitions.',
+          error: docxCheck.error || 'Invalid DOCX structure.',
         };
       }
 

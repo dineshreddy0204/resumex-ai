@@ -254,6 +254,22 @@ export interface JobMatchResult {
   semanticSource?: 'embedding' | 'fallback';
 }
 
+export interface EmploymentGap {
+  id: string;
+  startDate: string;
+  endDate: string;
+  durationMonths: number;
+  previousRole?: string;
+  previousCompany?: string;
+  nextRole?: string;
+  nextCompany?: string;
+  impactAssessment: string;
+  constructiveFraming: string;
+  suggestedPhrasing: string;
+  skillsMaintainedOrDeveloped: string[];
+  honestPositioningAdvice: string;
+}
+
 export interface CareerGapAnalysis {
   userId?: string;
   resumeId?: string;
@@ -276,6 +292,7 @@ export interface CareerGapAnalysis {
     issue: string;
     recommendedAction: string;
   }[];
+  employmentGaps?: EmploymentGap[];
   actionPlan: {
     skillsToLearn: string[];
     recommendedProjects: {

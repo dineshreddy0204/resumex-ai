@@ -169,6 +169,8 @@ export class CareerGapEngine {
       }
     }
 
+    const employmentGaps = this.analyzeEmploymentGaps(data);
+
     return {
       targetRole,
       currentSkills: currentSkillsList,
@@ -176,12 +178,168 @@ export class CareerGapEngine {
       developingSkills,
       missingSkills,
       evidenceGaps,
+      employmentGaps,
       actionPlan: {
         skillsToLearn: missingSkills.map((m) => m.skill),
         recommendedProjects: benchmark.recommendedProjects,
         resumeAdditions: evidenceGaps.map((e) => e.recommendedAction),
       },
     };
+  }
+
+  /**
+   * Identifies employment timeline gaps > 6 months.
+   * Computes precise duration in months and generates constructive framing,
+   * suggested interview phrasing, maintained skills, and honest positioning advice.
+   * STRICT POLICY: Never invents fake employer names or fictional work experience to hide a gap.
+   */
+  public analyzeEmploymentGaps(data: ResumeData) {
+    const gaps: Array<{
+      id: string;
+      startDate: string;
+      endDate: string;
+      durationMonths: number;
+      previousRole?: string;
+      previousCompany?: string;
+      nextRole?: string;
+      nextCompany?: string;
+      impactAssessment: string;
+      constructiveFraming: string;
+      suggestedPhrasing: string;
+      skillsMaintainedOrDeveloped: string[];
+      honestPositioningAdvice: string;
+    }> = [];
+
+    if (!data.experience || data.experience.length === 0) return gaps;
+
+    // Helper to parse dates into comparable month values (year * 12 + monthIndex 0..11)
+    const parseDateToMonths = (dateStr?: string): number | null => {
+      if (!dateStr) return null;
+      const clean = dateStr.trim().toLowerCase();
+      if (clean === 'present' || clean === 'current' || clean === 'now' || clean === 'ongoing') {
+        const now = new Date();
+        return now.getFullYear() * 12 + now.getMonth();
+      }
+
+      // Format: YYYY-MM or YYYY/MM
+      const yyyyMm = clean.match(/^(\d{4})[-/](\d{1,2})$/);
+      if (yyyyMm) {
+        return parseInt(yyyyMm[1], 10) * 12 + (parseInt(yyyyMm[2], 10) - 1);
+      }
+
+      // Format: MM/YYYY
+      const mmYyyy = clean.match(/^(\d{1,2})[-/](\d{4})$/);
+      if (mmYyyy) {
+        return parseInt(mmYyyy[2], 10) * 12 + (parseInt(mmYyyy[1], 10) - 1);
+      }
+
+      // Format: Month YYYY (e.g. Jan 2022, January 2022)
+      const monthNames: Record<string, number> = {
+        jan: 0, january: 0,
+        feb: 1, february: 1,
+        mar: 2, march: 2,
+        apr: 3, april: 3,
+        may: 4,
+        jun: 5, june: 5,
+        jul: 6, july: 6,
+        aug: 7, august: 7,
+        sep: 8, sept: 8, september: 8,
+        oct: 9, october: 9,
+        nov: 10, november: 10,
+        dec: 11, december: 11,
+      };
+
+      const monthYear = clean.match(/^([a-z]+)\.?\s+(\d{4})$/);
+      if (monthYear && monthNames[monthYear[1]] !== undefined) {
+        return parseInt(monthYear[2], 10) * 12 + monthNames[monthYear[1]];
+      }
+
+      // Format: Just YYYY (e.g. 2021)
+      const yearOnly = clean.match(/^(\d{4})$/);
+      if (yearOnly) {
+        return parseInt(yearOnly[1], 10) * 12 + 5; // mid-year estimate
+      }
+
+      return null;
+    };
+
+    // Extract valid chronological experience items
+    const parsedExperiences = data.experience
+      .map((exp) => ({
+        exp,
+        startMonths: parseDateToMonths(exp.startDate),
+        endMonths: parseDateToMonths(exp.endDate),
+      }))
+      .filter((item): item is { exp: typeof item.exp; startMonths: number; endMonths: number } =>
+        item.startMonths !== null && item.endMonths !== null
+      )
+      .sort((a, b) => a.startMonths - b.startMonths); // Chronological order (oldest first)
+
+    // Analyze gaps between consecutive employment entries
+    for (let i = 0; i < parsedExperiences.length - 1; i++) {
+      const prev = parsedExperiences[i];
+      const next = parsedExperiences[i + 1];
+
+      // Gap is from prev.endMonths to next.startMonths
+      const gapMonths = next.startMonths - prev.endMonths;
+
+      if (gapMonths > 6) {
+        const startYear = Math.floor(prev.endMonths / 12);
+        const startMonth = (prev.endMonths % 12) + 1;
+        const endYear = Math.floor(next.startMonths / 12);
+        const endMonth = (next.startMonths % 12) + 1;
+
+        const startDateStr = prev.exp.endDate || `${startYear}-${String(startMonth).padStart(2, '0')}`;
+        const endDateStr = next.exp.startDate || `${endYear}-${String(endMonth).padStart(2, '0')}`;
+
+        // Relevant skills candidate maintained based on resume
+        const candidateSkills = (data.skills || []).flatMap((g) => g.items || []).slice(0, 5);
+
+        gaps.push({
+          id: `gap-${i + 1}`,
+          startDate: startDateStr,
+          endDate: endDateStr,
+          durationMonths: gapMonths,
+          previousRole: prev.exp.role,
+          previousCompany: prev.exp.company,
+          nextRole: next.exp.role,
+          nextCompany: next.exp.company,
+          impactAssessment: `A ${gapMonths}-month career interval between ${prev.exp.company || 'previous role'} and ${next.exp.company || 'subsequent role'}. Without clear narrative framing, automated screeners and recruiters may assume skill rust.`,
+          constructiveFraming: `Frame this interval as an intentional transition dedicated to skill acquisition, technical exploration, certifications, or family responsibilities.`,
+          suggestedPhrasing: `Between ${startDateStr} and ${endDateStr}, I focused on targeted professional growth, strengthening my hands-on architecture capabilities and keeping technical skills sharp.`,
+          skillsMaintainedOrDeveloped: candidateSkills.length > 0 ? candidateSkills : ['System Architecture', 'Self-Directed Learning', 'Technical Exploration'],
+          honestPositioningAdvice: 'Never invent fake employer names or fictional work experience to hide a gap. Hiring managers and background checks strictly verify company history. Transparent, confident communication of self-directed learning and real life responsibilities builds trust.',
+        });
+      }
+    }
+
+    // Check if the most recent role ended > 6 months ago and is not current
+    if (parsedExperiences.length > 0) {
+      const latest = parsedExperiences[parsedExperiences.length - 1];
+      const isCurrent = (latest.exp.endDate || '').toLowerCase().match(/present|current|now|ongoing/);
+      if (!isCurrent) {
+        const nowMonths = new Date().getFullYear() * 12 + new Date().getMonth();
+        const currentGap = nowMonths - latest.endMonths;
+        if (currentGap > 6) {
+          const candidateSkills = (data.skills || []).flatMap((g) => g.items || []).slice(0, 5);
+          gaps.push({
+            id: 'gap-current',
+            startDate: latest.exp.endDate || 'Recent Role',
+            endDate: 'Present',
+            durationMonths: currentGap,
+            previousRole: latest.exp.role,
+            previousCompany: latest.exp.company,
+            impactAssessment: `An ongoing ${currentGap}-month career gap since leaving ${latest.exp.company || 'most recent role'}. Recruiters seek reassurance regarding current technical currency and availability.`,
+            constructiveFraming: 'Position current period as an active search and continuous learning cycle where you have been evaluating aligned opportunities, maintaining technical hands-on momentum, and contributing to projects.',
+            suggestedPhrasing: `Since completing my role at ${latest.exp.company || 'my last team'}, I have been actively building technical proof-of-concept projects, refining my distributed systems skillset, and selectively interviewing for high-alignment engineering teams.`,
+            skillsMaintainedOrDeveloped: candidateSkills.length > 0 ? candidateSkills : ['Technical Currency', 'Architecture Design', 'Active Coding'],
+            honestPositioningAdvice: 'Never invent fake employer names or fictional work experience to hide a gap. Demonstrating active coding projects and continuous learning on GitHub provides concrete proof of ongoing readiness.',
+          });
+        }
+      }
+    }
+
+    return gaps;
   }
 }
 

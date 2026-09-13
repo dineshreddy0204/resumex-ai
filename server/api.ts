@@ -32,6 +32,11 @@ import { nlpEvaluation } from './services/nlpEvaluation';
 import { resumeTruthEngine } from './services/resumeTruthEngine';
 import { emailService } from './services/emailService';
 import { isGeminiAvailable } from './gemini';
+import {
+  authLoginRateLimiter,
+  aiRateLimiter,
+  uploadRateLimiter,
+} from './services/rateLimiter';
 
 export const apiRouter = express.Router();
 apiRouter.use(express.json({ limit: '15mb' }));
@@ -56,10 +61,10 @@ apiRouter.get('/auth/csrf', (_req: Request, res: Response) => {
   res.json({ csrfToken: token });
 });
 
-// Multer configured with memory storage and strict 15MB limit
+// Multer configured with memory storage and strict 10MB limit (Directive 16)
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 15 * 1024 * 1024 },
+  limits: { fileSize: 10 * 1024 * 1024 },
 });
 
 // Helper for structured errors
@@ -76,26 +81,8 @@ function sendStructuredError(res: Response, status: number, code: string, messag
   });
 }
 
-// Simple in-memory rate-limiter for auth endpoints
-const authRateLimitMap = new Map<string, { count: number; resetAt: number }>();
-function authRateLimiter(req: Request, res: Response, next: NextFunction) {
-  const ip = req.ip || req.socket.remoteAddress || 'unknown';
-  const now = Date.now();
-  const entry = authRateLimitMap.get(ip) || { count: 0, resetAt: now + 60000 };
-
-  if (now > entry.resetAt) {
-    entry.count = 1;
-    entry.resetAt = now + 60000;
-  } else {
-    entry.count++;
-  }
-  authRateLimitMap.set(ip, entry);
-
-  if (entry.count > 30) {
-    return sendStructuredError(res, 429, 'RATE_LIMIT_EXCEEDED', 'Too many requests. Please wait a minute and try again.');
-  }
-  next();
-}
+// Backward compatible alias
+const authRateLimiter = authLoginRateLimiter;
 
 // --- 1. HEALTH & OBSERVABILITY ---
 apiRouter.get('/health', async (_req: Request, res: Response) => {
@@ -113,11 +100,22 @@ apiRouter.get('/health', async (_req: Request, res: Response) => {
   res.json({
     status: overallStatus,
     database: dbStatus,
-    ai: aiStatus,
-    version: 'Core Ultra 9.9',
-    geminiEnabled: isGeminiAvailable(),
+    environment: process.env.NODE_ENV || 'development',
+    version: process.env.APP_VERSION || '1.0.0',
+    commit: process.env.GIT_COMMIT || 'production',
     uptime: Math.floor(process.uptime()),
     timestamp: new Date().toISOString(),
+    ai: aiStatus,
+    geminiEnabled: isGeminiAvailable(),
+  });
+});
+
+apiRouter.get('/auth/config', (_req: Request, res: Response) => {
+  const isProd = process.env.NODE_ENV === 'production';
+  const enableDemo = process.env.ENABLE_DEMO_LOGIN === 'true';
+  res.json({
+    demoLoginEnabled: !isProd && enableDemo,
+    googleAuthEnabled: Boolean(process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID),
   });
 });
 
@@ -559,6 +557,9 @@ apiRouter.get('/profile', requireAuth, async (req: AuthenticatedRequest, res: Re
 apiRouter.put('/profile', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const updated = await db.updateProfile(req.user!.id, req.body);
+    await db.logAudit(req.user!.id, 'PROFILE_UPDATED', 'User', req.user!.id, {
+      fields: Object.keys(req.body),
+    });
     res.json({ profile: updated });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Failed to update profile.';
@@ -640,6 +641,7 @@ apiRouter.get('/resumes/:id', requireAuth, async (req: AuthenticatedRequest, res
 apiRouter.post(
   '/resumes/upload',
   requireAuth,
+  uploadRateLimiter,
   upload.single('file'),
   async (req: AuthenticatedRequest, res: Response) => {
     try {
@@ -883,7 +885,7 @@ apiRouter.post('/resumes/:id/export', requireAuth, async (req: AuthenticatedRequ
 });
 
 // --- 5. OPTIMIZATION & RESUMETRUTH ENGINE ---
-apiRouter.post('/resumes/:id/optimize/bullet', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+apiRouter.post('/resumes/:id/optimize/bullet', requireAuth, aiRateLimiter, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const resume = await db.getResume(req.user!.id, req.params.id);
     const { bullet, roleTitle, company } = req.body;
@@ -904,7 +906,7 @@ apiRouter.post('/resumes/:id/optimize/bullet', requireAuth, async (req: Authenti
   }
 });
 
-apiRouter.post('/resumes/:id/optimize/summary', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+apiRouter.post('/resumes/:id/optimize/summary', requireAuth, aiRateLimiter, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const resume = await db.getResume(req.user!.id, req.params.id);
     const { currentSummary, targetRole } = req.body;

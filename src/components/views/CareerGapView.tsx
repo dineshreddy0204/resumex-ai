@@ -18,6 +18,7 @@ import {
   ShieldCheck,
   Briefcase,
   Layers,
+  Clock,
 } from 'lucide-react';
 
 interface CareerGapViewProps {
@@ -53,7 +54,7 @@ export const CareerGapView: React.FC<CareerGapViewProps> = ({ resume, onNavigate
   const [selectedRole, setSelectedRole] = useState<string>(TARGET_ROLES[0]);
   const [selectedSeniority, setSelectedSeniority] = useState<string>(SENIORITY_LEVELS[1]);
   const [selectedIndustry, setSelectedIndustry] = useState<string>(TARGET_INDUSTRIES[1]);
-  const [activeGapTab, setActiveGapTab] = useState<'skills' | 'leadership' | 'metrics' | 'certs'>('skills');
+  const [activeGapTab, setActiveGapTab] = useState<'skills' | 'timeline' | 'leadership' | 'metrics' | 'certs'>('skills');
   const [gapAnalysis, setGapAnalysis] = useState<CareerGapAnalysis | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -284,6 +285,7 @@ export const CareerGapView: React.FC<CareerGapViewProps> = ({ resume, onNavigate
               <div className="flex items-center gap-1">
                 {[
                   { id: 'skills', label: 'Missing Skills & Tools' },
+                  { id: 'timeline', label: `Timeline Gaps (${gapAnalysis.employmentGaps?.length || 0})` },
                   { id: 'leadership', label: 'Leadership & Scope Gaps' },
                   { id: 'metrics', label: 'Metric Gaps' },
                   { id: 'certs', label: 'Certifications' },
@@ -326,6 +328,84 @@ export const CareerGapView: React.FC<CareerGapViewProps> = ({ resume, onNavigate
                     </span>
                   </div>
                 ))}
+              </div>
+            )}
+
+            {/* Sub-tab: Timeline Gaps (>6mo) (Directive 14) */}
+            {activeGapTab === 'timeline' && (
+              <div className="space-y-4 pt-1">
+                {(!gapAnalysis.employmentGaps || gapAnalysis.employmentGaps.length === 0) ? (
+                  <div className="p-5 rounded-xl bg-[#FAF9F5] border border-[#EAE8E1] text-xs text-center space-y-1">
+                    <div className="font-bold text-[#171713] flex items-center justify-center gap-1.5 text-sm">
+                      <CheckCircle2 className="w-4 h-4 text-[#4F5D2F]" />
+                      <span>No Employment Timeline Gaps (&gt; 6 Months) Detected</span>
+                    </div>
+                    <p className="text-[#6E6E63] max-w-xl mx-auto">
+                      Your documented work experience shows continuous employment or brief transitions under 6 months. Standard automated screeners and recruiters flag gaps exceeding 6 months.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {gapAnalysis.employmentGaps.map((gap) => (
+                      <div
+                        key={gap.id}
+                        className="p-4 rounded-xl bg-[#FAF9F5] border border-[#EAE8E1] text-xs space-y-3 shadow-2xs"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#EAE8E1] pb-2">
+                          <div className="flex items-center gap-2">
+                            <Clock className="w-4 h-4 text-[#8E6D24]" />
+                            <span className="font-bold text-[#171713] text-sm">
+                              {gap.durationMonths} Months Career Interval
+                            </span>
+                            <span className="text-[#6E6E63] text-xs">
+                              ({gap.startDate} — {gap.endDate})
+                            </span>
+                          </div>
+                          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-[#C49A3A]/15 text-[#8E6D24] border border-[#C49A3A]/30">
+                            {gap.previousCompany || 'Role'} → {gap.nextCompany || 'Next'}
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          <div className="space-y-1">
+                            <div className="font-semibold text-[#171713] text-[11px]">Reason & Recruiter Impact:</div>
+                            <p className="text-[#6E6E63] text-xs leading-relaxed">{gap.impactAssessment}</p>
+                          </div>
+                          <div className="space-y-1">
+                            <div className="font-semibold text-[#4F5D2F] text-[11px]">Constructive Framing:</div>
+                            <p className="text-[#6E6E63] text-xs leading-relaxed">{gap.constructiveFraming}</p>
+                          </div>
+                        </div>
+
+                        <div className="p-3 bg-white rounded-lg border border-[#EAE8E1] space-y-1">
+                          <div className="font-semibold text-[#171713] text-[11px]">Suggested Interview & Summary Phrasing:</div>
+                          <p className="text-xs text-[#171713] italic leading-relaxed">
+                            "{gap.suggestedPhrasing}"
+                          </p>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-2 pt-1">
+                          <span className="text-[11px] font-medium text-[#6E6E63]">Skills Maintained:</span>
+                          {gap.skillsMaintainedOrDeveloped.map((skill, sIdx) => (
+                            <span
+                              key={sIdx}
+                              className="px-2 py-0.5 rounded bg-white border border-[#EAE8E1] text-[10px] font-semibold text-[#171713]"
+                            >
+                              {skill}
+                            </span>
+                          ))}
+                        </div>
+
+                        <div className="p-2.5 rounded-lg bg-white border border-[#4F5D2F]/20 text-[11px] text-[#6E6E63] flex items-start gap-2">
+                          <ShieldCheck className="w-4 h-4 text-[#4F5D2F] shrink-0 mt-0.5" />
+                          <span>
+                            <strong>Honest Positioning Standard:</strong> {gap.honestPositioningAdvice}
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 
