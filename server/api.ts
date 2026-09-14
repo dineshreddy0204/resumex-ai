@@ -384,7 +384,7 @@ apiRouter.post('/auth/google', authRateLimiter, async (req: Request, res: Respon
       profile,
     });
   } catch (err: unknown) {
-    console.error('Google OAuth error:', err);
+    console.error('Google OAuth error:', err instanceof Error ? err.message : 'Verification failed');
     const msg = err instanceof Error ? err.message : 'An error occurred while verifying Google OAuth.';
     sendStructuredError(res, 401, 'GOOGLE_AUTH_ERROR', msg);
   }

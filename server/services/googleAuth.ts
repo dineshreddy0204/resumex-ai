@@ -9,12 +9,23 @@ export interface ValidatedGoogleUser {
 }
 
 export class GoogleAuthService {
-  private client: OAuth2Client;
+  private client: OAuth2Client | null = null;
   private configuredClientId: string | undefined;
 
   constructor() {
     this.configuredClientId = process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID;
-    this.client = new OAuth2Client(this.configuredClientId);
+    if (this.configuredClientId) {
+      this.client = new OAuth2Client(this.configuredClientId);
+    }
+  }
+
+  private getClient(): OAuth2Client {
+    const activeClientId = process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID || this.configuredClientId;
+    if (!this.client || this.configuredClientId !== activeClientId) {
+      this.configuredClientId = activeClientId;
+      this.client = new OAuth2Client(activeClientId);
+    }
+    return this.client;
   }
 
   /**
@@ -26,18 +37,20 @@ export class GoogleAuthService {
       throw new Error('Google ID token is required and must be a valid string.');
     }
 
-    const clientId = this.configuredClientId || process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID;
+    const clientId = process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID || this.configuredClientId;
 
     // Reject if Google Auth is not configured
     if (!clientId) {
       throw new Error('Google sign-in is not configured on this server. Please configure GOOGLE_CLIENT_ID in your environment settings.');
     }
 
+    const client = this.getClient();
+
     // 1. Verify cryptographic signature & get payload
     let payload: TokenPayload | undefined;
 
     try {
-      const ticket = await this.client.verifyIdToken({
+      const ticket = await client.verifyIdToken({
         idToken,
         audience: clientId,
       });
@@ -78,10 +91,10 @@ export class GoogleAuthService {
 
     // 7. Validate Expiration & Timestamps
     const nowSec = Math.floor(Date.now() / 1000);
-    if (payload.exp < nowSec) {
+    if (typeof payload.exp !== 'number' || payload.exp < nowSec) {
       throw new Error('Google ID token has expired. Please sign in again.');
     }
-    if (payload.iat > nowSec + 300) {
+    if (typeof payload.iat !== 'number' || payload.iat > nowSec + 300) {
       // 5 min clock skew tolerance
       throw new Error('Google ID token issued in the future (clock skew detected).');
     }

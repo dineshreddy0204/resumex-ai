@@ -388,6 +388,47 @@ The table below describes all environment variables supported by ResumeX AI:
 - **Enforce a high-entropy `JWT_SECRET`**. The server enforces a minimum 32-character length for `JWT_SECRET` at production boot.
 - **Ensure `ENABLE_DEMO_LOGIN=false` in production** to prevent unauthorized demo authentication.
 
+### Google Sign-In & OAuth 2.0 Configuration Guide
+
+ResumeX AI uses **Google Identity Services (GIS)** with server-side cryptographic OpenID Connect verification via `google-auth-library`.
+
+#### 1. Create a Google Cloud OAuth 2.0 Web Client
+1. Open the [Google Cloud Console](https://console.cloud.google.com/).
+2. Navigate to **APIs & Services** &rarr; **Credentials**.
+3. Click **Create Credentials** &rarr; **OAuth client ID**.
+4. Select **Web application** as the application type.
+5. Set the client name (e.g., `ResumeX AI Web Client`).
+
+#### 2. Configure Authorized JavaScript Origins
+Add the exact origins where your application is hosted under **Authorized JavaScript origins**:
+
+| Environment | Authorized JavaScript Origin URL |
+| :--- | :--- |
+| **Deployed Dev Instance** | `https://ais-dev-dt5aowrk4fi45sk7wqb4p5-168252918909.asia-east1.run.app` |
+| **Deployed Preview Instance** | `https://ais-pre-dt5aowrk4fi45sk7wqb4p5-168252918909.asia-east1.run.app` |
+| **Local Development** | `http://localhost:3000` |
+
+> [!IMPORTANT]
+> **Strict Origin Formatting Rules:**
+> - **NO Trailing Slash**: Use `https://domain.run.app` (never `https://domain.run.app/`).
+> - **NO Path Components**: Do NOT add `/login`, `/auth`, or `/callback` as origins. Origins only comprise scheme, hostname, and port.
+> - **NO Wildcards**: Google Cloud does not support wildcard patterns like `*.run.app`. Each specific domain must be registered explicitly.
+> - **NO accounts.google.com**: Never add Google's own domain as an authorized JavaScript origin.
+> - **Production Must Use HTTPS**: All non-localhost production origins must use `https://`.
+
+#### 3. Set Environment Variables
+Set the generated OAuth 2.0 Client ID in your application settings or `.env` file:
+```env
+GOOGLE_CLIENT_ID=147093747062-8rfl0oir551nqjtn3hjufm3fftkfl2rc.apps.googleusercontent.com
+VITE_GOOGLE_CLIENT_ID=147093747062-8rfl0oir551nqjtn3hjufm3fftkfl2rc.apps.googleusercontent.com
+```
+
+#### 4. Troubleshooting "Access blocked: Authorization Error / no registered origin / Error 401: invalid_client"
+If Google displays this error:
+1. Verify that your current browser URL (e.g., `https://ais-dev-dt5aowrk4fi45sk7wqb4p5-168252918909.asia-east1.run.app`) is explicitly listed in **Authorized JavaScript origins** in Google Cloud Console.
+2. Ensure you clicked **Save** in the Google Cloud Console. Note that Google OAuth changes can take 5 to 10 minutes to propagate globally across Google's edge authentication servers.
+3. In the ResumeX AI Auth Modal, a diagnostic card will automatically display the detected origin and provide a one-click **Copy Origin** button.
+
 ---
 
 ## 🛠️ Development & Available Scripts
