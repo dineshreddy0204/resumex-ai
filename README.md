@@ -719,5 +719,6 @@ All 17 test suites (68 assertions) are passing, the TypeScript codebase compiles
 ---
 
 ## 👤 Author
-
-Add your name and GitHub profile here.
+Name:Pallem Dinesh Kumar Reddy 
+github:dineshreddy0204
+linkedin:https://www.linkedin.com/in/dinesh-reddy-pallem
