@@ -44,15 +44,12 @@ export class DatabaseEngine {
   constructor() {
     const dbUrl = process.env.DATABASE_URL;
     if (!dbUrl) {
-      if (process.env.NODE_ENV === 'production') {
-        throw new Error('FATAL: DATABASE_URL environment variable is required in production.');
-      }
       console.warn('[Database] WARNING: DATABASE_URL is not set. Database operations will require DATABASE_URL.');
     }
 
     this.pgPool = new Pool({
-      connectionString: dbUrl,
-      ssl: { rejectUnauthorized: false },
+      connectionString: dbUrl || 'postgresql://localhost:5432/postgres',
+      ssl: dbUrl ? { rejectUnauthorized: false } : false,
       max: 20,
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 8000,
@@ -93,6 +90,11 @@ export class DatabaseEngine {
 
     this.initPromise = (async () => {
       try {
+        if (!process.env.DATABASE_URL) {
+          console.warn('[Database] Skipping migrations bootstrap: DATABASE_URL not configured.');
+          return;
+        }
+
         // 1. Run all versioned migrations cleanly
         await MigrationRunner.runMigrations(this.pgPool);
 
