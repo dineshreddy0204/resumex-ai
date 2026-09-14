@@ -23,10 +23,13 @@ export default defineConfig(() => {
           const { apiRouter } = await import('./server/api');
           const app = express();
           app.use(express.json({ limit: '50mb' }));
+          app.get('/health', (_req, res) => {
+            res.json({ status: 'healthy', timestamp: new Date().toISOString() });
+          });
           app.use('/api', apiRouter);
 
           server.middlewares.use((req, res, next) => {
-            if (req.url?.startsWith('/api')) {
+            if (req.url === '/health' || req.url?.startsWith('/api')) {
               app(req as any, res as any, next);
             } else {
               next();
@@ -41,6 +44,8 @@ export default defineConfig(() => {
       },
     },
     server: {
+      port: Number(process.env.PORT) || 3000,
+      host: '0.0.0.0',
       hmr: process.env.DISABLE_HMR !== 'true',
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
     },

@@ -192,8 +192,8 @@ Left Column Item 3          Right Column Item 3`;
   assert(pwValid === true, 'Verifies correct password with bcrypt');
   assert(pwInvalid === false, 'Rejects incorrect password with bcrypt');
 
-  // --- Test Suite 11: Google OIDC Token Verification & Claim Enforcement ---
-  console.log('\nTest Suite 11: Google OIDC Validation Constraints');
+  // --- Test Suite 11: Google OIDC & Firebase Auth Token Verification & Claim Enforcement ---
+  console.log('\nTest Suite 11: Google OIDC & Firebase Auth Validation Constraints');
   const { googleAuthService } = await import('./services/googleAuth');
   let missingTokenError = false;
   try {
@@ -210,6 +210,48 @@ Left Column Item 3          Right Column Item 3`;
     malformedTokenError = true;
   }
   assert(malformedTokenError, 'Rejects malformed non-JWT token string');
+
+  // Test Firebase ID token with unverified forged signature
+  const fakeHeader = Buffer.from(JSON.stringify({ alg: 'RS256', kid: 'fake-kid-123' })).toString('base64url');
+  const fakeFirebasePayload = Buffer.from(
+    JSON.stringify({
+      iss: 'https://securetoken.google.com/massive-tracer-sds98',
+      aud: 'massive-tracer-sds98',
+      sub: 'forged-user-id',
+      email: 'attacker@evil.com',
+      email_verified: true,
+      exp: Math.floor(Date.now() / 1000) + 3600,
+      iat: Math.floor(Date.now() / 1000) - 10,
+    })
+  ).toString('base64url');
+  const fakeSignature = Buffer.from('unverified_fake_signature_bytes').toString('base64url');
+  const forgedFirebaseToken = `${fakeHeader}.${fakeFirebasePayload}.${fakeSignature}`;
+
+  let forgedTokenRejected = false;
+  try {
+    await googleAuthService.verifyIdToken(forgedFirebaseToken);
+  } catch (err: any) {
+    forgedTokenRejected = true;
+  }
+  assert(forgedTokenRejected, 'Strictly rejects forged/unverified Firebase ID token');
+
+  // Test token with unauthorized issuer
+  const invalidIssuerPayload = Buffer.from(
+    JSON.stringify({
+      iss: 'https://evil-unauthorized-issuer.com',
+      sub: 'user-1',
+      email: 'user@example.com',
+    })
+  ).toString('base64url');
+  const invalidIssuerToken = `${fakeHeader}.${invalidIssuerPayload}.${fakeSignature}`;
+
+  let invalidIssuerRejected = false;
+  try {
+    await googleAuthService.verifyIdToken(invalidIssuerToken);
+  } catch (err: any) {
+    invalidIssuerRejected = true;
+  }
+  assert(invalidIssuerRejected, 'Strictly rejects tokens with unauthorized issuer claim');
 
   // --- Test Suite 12: Zero-Fabrication AI & Optimization Engine ---
   console.log('\nTest Suite 12: Zero-Fabrication AI & Unverified Metric Detection');

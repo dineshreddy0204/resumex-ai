@@ -1,4 +1,6 @@
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
 import multer from 'multer';
@@ -46,7 +48,6 @@ apiRouter.use((req: Request, res: Response, next: NextFunction) => {
   const requestId = (req.headers['x-request-id'] as string) || crypto.randomUUID();
   res.setHeader('X-Request-Id', requestId);
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   next();
 });
@@ -113,9 +114,11 @@ apiRouter.get('/health', async (_req: Request, res: Response) => {
 apiRouter.get('/auth/config', (_req: Request, res: Response) => {
   const isProd = process.env.NODE_ENV === 'production';
   const enableDemo = process.env.ENABLE_DEMO_LOGIN === 'true';
+  const hasFirebaseConfig = fs.existsSync(path.resolve(process.cwd(), 'firebase-applet-config.json')) || Boolean(process.env.FIREBASE_PROJECT_ID);
   res.json({
     demoLoginEnabled: !isProd && enableDemo,
-    googleAuthEnabled: Boolean(process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID),
+    googleAuthEnabled: hasFirebaseConfig || Boolean(process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID),
+    authProvider: hasFirebaseConfig ? 'firebase' : 'google-oidc',
   });
 });
 
@@ -149,8 +152,8 @@ apiRouter.post('/auth/signup', authRateLimiter, async (req: Request, res: Respon
     }
 
     const { user, verificationToken } = await db.createUser(name, email, password);
-    const host = req.get('host') || 'localhost:3000';
-    const protocol = req.protocol || 'http';
+    const host = req.get('host') || (process.env.APP_URL ? new URL(process.env.APP_URL).host : '0.0.0.0:3000');
+    const protocol = req.protocol || (process.env.NODE_ENV === 'production' ? 'https' : 'http');
     const verifyUrl = `${protocol}://${host}/verify-email?token=${verificationToken}`;
 
     await emailService.sendVerificationEmail(user.email, user.name, verificationToken, verifyUrl);
@@ -226,7 +229,7 @@ apiRouter.post('/auth/resend-verification', authRateLimiter, async (req: Request
 
     const result = await db.resendVerificationToken(email);
     if (result) {
-      const host = req.get('host') || 'localhost:3000';
+      const host = req.get('host') || (process.env.APP_URL ? new URL(process.env.APP_URL).host : '0.0.0.0:3000');
       const protocol = req.protocol === 'https' || req.get('x-forwarded-proto') === 'https' ? 'https' : 'http';
       const verifyUrl = `${protocol}://${host}/?action=verify&token=${result.verificationToken}`;
       await emailService.sendVerificationEmail(result.user.email, result.user.name, result.verificationToken, verifyUrl);
@@ -470,8 +473,8 @@ apiRouter.post('/auth/forgot-password', authRateLimiter, async (req: Request, re
     }
 
     const result = await db.createPasswordResetToken(email);
-    const host = req.get('host') || 'localhost:3000';
-    const protocol = req.protocol || 'http';
+    const host = req.get('host') || (process.env.APP_URL ? new URL(process.env.APP_URL).host : '0.0.0.0:3000');
+    const protocol = req.protocol || (process.env.NODE_ENV === 'production' ? 'https' : 'http');
 
     if (result) {
       const resetUrl = `${protocol}://${host}/reset-password?token=${result.resetToken}`;
@@ -1320,4 +1323,16 @@ apiRouter.get(['/audit', '/audit-logs', '/audit-events'], requireAuth, async (re
 apiRouter.get('/evaluation', (_req: Request, res: Response) => {
   const report = nlpEvaluation.runEvaluationSuite();
   res.json({ report });
+});
+
+// 404 handler for unknown /api endpoints
+apiRouter.all('*', (req: Request, res: Response) => {
+  res.status(404).json({
+    success: false,
+    error: {
+      code: 'ROUTE_NOT_FOUND',
+      message: `API route ${req.method} ${req.originalUrl} not found.`,
+      timestamp: new Date().toISOString(),
+    },
+  });
 });

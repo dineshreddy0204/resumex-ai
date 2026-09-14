@@ -1,11 +1,11 @@
 import express from 'express';
 import path from 'path';
-import { createServer as createViteServer } from 'vite';
 import { apiRouter } from './server/api';
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
+  const HOST = '0.0.0.0';
 
   // Trust proxy for reverse proxies (e.g. Cloud Run, Nginx, ALB)
   app.set('trust proxy', 1);
@@ -13,20 +13,19 @@ async function startServer() {
   // Global HTTP Security Headers & Content Security Policy (CSP)
   app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
 
-    // CSP directive configuration
+    // CSP directive configuration — Allows Google AI Studio iframe embedding, Firebase, Google APIs, and fonts
     res.setHeader(
       'Content-Security-Policy',
       "default-src 'self'; " +
-        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://accounts.google.com https://apis.google.com; " +
+        "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://accounts.google.com https://apis.google.com https://*.firebaseapp.com; " +
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
         "font-src 'self' https://fonts.gstatic.com data:; " +
-        "img-src 'self' data: blob: https://*.googleusercontent.com https://images.unsplash.com; " +
-        "connect-src 'self' https://accounts.google.com https://apis.google.com https://generativelanguage.googleapis.com; " +
-        "frame-src 'self' https://accounts.google.com; " +
-        "frame-ancestors 'self';"
+        "img-src 'self' data: blob: https://*.googleusercontent.com https://images.unsplash.com https://*.gstatic.com; " +
+        "connect-src 'self' https://accounts.google.com https://apis.google.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://*.googleapis.com https://generativelanguage.googleapis.com https://*.run.app; " +
+        "frame-src 'self' https://accounts.google.com https://*.firebaseapp.com https://*.google.com; " +
+        "frame-ancestors 'self' https://ai.studio https://*.ai.studio https://*.google.com https://*.googleusercontent.com https://*.run.app;"
     );
 
     if (process.env.NODE_ENV === 'production' && req.secure) {
@@ -41,6 +40,7 @@ async function startServer() {
         origin.startsWith('http://127.0.0.1:') ||
         origin.endsWith('.run.app') ||
         origin.endsWith('.google.com') ||
+        origin.endsWith('.ai.studio') ||
         origin.endsWith('.aistudio.google.com') ||
         Boolean(process.env.APP_URL && origin === process.env.APP_URL);
 
@@ -62,13 +62,19 @@ async function startServer() {
     next();
   });
 
+  // Root health probe for container environments (Cloud Run, Kubernetes, Docker)
+  app.get('/health', (_req, res) => {
+    res.status(200).json({ status: 'healthy', timestamp: new Date().toISOString() });
+  });
+
   // Mount API routes FIRST before any middleware/static fallbacks
   app.use('/api', apiRouter);
 
   // Vite middleware for development; static distribution for production
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, hmr: process.env.DISABLE_HMR !== 'true' },
       appType: 'spa',
     });
     app.use(vite.middlewares);
@@ -80,9 +86,23 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`ResumeX AI Server listening on http://0.0.0.0:${PORT}`);
+  const server = app.listen(PORT, HOST, () => {
+    console.log(`ResumeX AI Server listening on http://${HOST}:${PORT}`);
   });
+
+  // Graceful shutdown handling for container rollouts
+  const shutdown = (signal: string) => {
+    console.log(`Received ${signal}, closing server gracefully...`);
+    server.close(() => {
+      console.log('Server closed successfully.');
+      process.exit(0);
+    });
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error('[Server] Fatal startup error:', err);
+  process.exit(1);
+});
