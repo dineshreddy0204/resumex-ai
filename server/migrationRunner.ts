@@ -1,11 +1,51 @@
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import type { Pool, PoolClient } from 'pg';
 
 export interface MigrationRecord {
   id: string;
   name: string;
   appliedAt: string;
+}
+
+function getCurrentDir(): string {
+  if (typeof __dirname !== 'undefined') {
+    return __dirname;
+  }
+  try {
+    return path.dirname(fileURLToPath(import.meta.url));
+  } catch {
+    return process.cwd();
+  }
+}
+
+/**
+ * Dynamically resolves the migrations directory in both development and production.
+ * Checks dist/migrations (production bundle), relative paths, and server/migrations (dev).
+ */
+export function resolveMigrationsDir(): string {
+  const currentDir = getCurrentDir();
+  const candidateDirs = [
+    path.join(process.cwd(), 'dist', 'migrations'),
+    path.resolve(currentDir, 'migrations'),
+    path.resolve(currentDir, '..', 'dist', 'migrations'),
+    path.join(process.cwd(), 'server', 'migrations'),
+    path.resolve(currentDir, '..', 'server', 'migrations'),
+    path.resolve(currentDir, 'server', 'migrations'),
+  ];
+
+  for (const dir of candidateDirs) {
+    if (fs.existsSync(dir)) {
+      const sqlFiles = fs.readdirSync(dir).filter((f) => f.endsWith('.sql'));
+      if (sqlFiles.length > 0) {
+        return dir;
+      }
+    }
+  }
+
+  // Fallback to server/migrations or dist/migrations
+  return path.join(process.cwd(), 'server', 'migrations');
 }
 
 export class MigrationRunner {
@@ -39,7 +79,7 @@ export class MigrationRunner {
         const appliedSet = new Set<string>(res.rows.map((r: { id: string }) => r.id));
 
         // 4. Discover migration files
-        const migrationsDir = path.join(process.cwd(), 'server', 'migrations');
+        const migrationsDir = resolveMigrationsDir();
         if (!fs.existsSync(migrationsDir)) {
           console.warn('[MigrationRunner] No migrations directory found at:', migrationsDir);
           return applied;

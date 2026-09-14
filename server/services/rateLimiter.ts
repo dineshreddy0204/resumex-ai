@@ -25,14 +25,11 @@ export const authLoginRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 5,
   standardHeaders: true,
-  legacyHeaders: false,
+  legacyHeaders: true,
   handler: createRateLimitHandler(
     'AUTH_RATE_LIMIT_EXCEEDED',
     'Too many login attempts. Please wait 15 minutes before trying again.'
   ),
-  skip: (req: Request) => {
-    return process.env.NODE_ENV === 'test' && req.headers['x-test-suite'] === 'true';
-  },
 });
 
 /**
@@ -43,14 +40,11 @@ export const aiRateLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
   max: 20,
   standardHeaders: true,
-  legacyHeaders: false,
+  legacyHeaders: true,
   handler: createRateLimitHandler(
     'AI_RATE_LIMIT_EXCEEDED',
     'AI generation rate limit reached (20 requests per minute). Please wait a moment before running more AI optimizations.'
   ),
-  skip: (req: Request) => {
-    return process.env.NODE_ENV === 'test' && req.headers['x-test-suite'] === 'true';
-  },
 });
 
 /**
@@ -61,12 +55,9 @@ export const uploadRateLimiter = rateLimit({
   windowMs: 10 * 60 * 1000, // 10 minutes
   max: 10,
   standardHeaders: true,
-  legacyHeaders: false,
+  legacyHeaders: true,
   handler: createRateLimitHandler(
     'UPLOAD_RATE_LIMIT_EXCEEDED',
     'File upload rate limit reached (10 uploads per 10 minutes). Please wait before uploading more documents.'
   ),
-  skip: (req: Request) => {
-    return process.env.NODE_ENV === 'test' && req.headers['x-test-suite'] === 'true';
-  },
 });

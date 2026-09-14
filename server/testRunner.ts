@@ -1,9 +1,15 @@
+import fs from 'fs';
+import path from 'path';
 import { nlpEvaluation } from './services/nlpEvaluation';
 import { documentParser } from './services/documentParser';
 import { resumeExtractor } from './services/resumeExtractor';
 import { atsAnalyzer } from './services/atsAnalyzer';
 import { exportEngine } from './services/exportEngine';
 import { resumeTruthEngine } from './services/resumeTruthEngine';
+import { resolveMigrationsDir } from './migrationRunner';
+import { UploadSecurity } from './services/uploadSecurity';
+import { optimizationEngine } from './services/optimizationEngine';
+import { requireCsrf, generateCsrfToken } from './auth';
 import type { ResumeData } from './types';
 
 async function runTests() {
@@ -300,6 +306,127 @@ Left Column Item 3          Right Column Item 3`;
   assert(
     atsEvidenceResult.keywordEvidence?.stuffingDetected === false,
     'Verifies natural keyword density without stuffing false positives'
+  );
+
+  // --- Test Suite 14: Production Migration Packaging & Directory Resolution ---
+  console.log('\nTest Suite 14: Production Migration Packaging & Directory Resolution');
+  const resolvedDir = resolveMigrationsDir();
+  assert(fs.existsSync(resolvedDir), 'Resolves migrations directory dynamically', resolvedDir);
+  const migrationFiles = fs.readdirSync(resolvedDir).filter((f) => f.endsWith('.sql'));
+  assert(migrationFiles.length >= 6, 'Locates all schema migration files in resolved path', `Found: ${migrationFiles.join(', ')}`);
+  assert(
+    migrationFiles.includes('001_initial.sql') && migrationFiles.includes('002_auth.sql') && migrationFiles.includes('006_security.sql'),
+    'Contains 001_initial.sql, 002_auth.sql, and 006_security.sql'
+  );
+
+  // --- Test Suite 15: CSRF Middleware Hardening (Zero Test Bypasses) ---
+  console.log('\nTest Suite 15: CSRF Security & Request Mutation Protection');
+  let csrfStatus: number | null = null;
+  let csrfResponse: any = null;
+  const mockMutatingReq = {
+    method: 'POST',
+    path: '/api/resumes/123',
+    headers: {},
+    cookies: {},
+  } as any;
+  const mockMutatingRes = {
+    status: (code: number) => {
+      csrfStatus = code;
+      return {
+        json: (data: any) => {
+          csrfResponse = data;
+        },
+      };
+    },
+  } as any;
+  let nextTriggered = false;
+
+  requireCsrf(mockMutatingReq, mockMutatingRes, () => {
+    nextTriggered = true;
+  });
+
+  assert(!nextTriggered, 'Blocks mutating request without CSRF tokens');
+  assert(csrfStatus === 403, 'Returns HTTP 403 Forbidden for missing CSRF token');
+  assert(
+    csrfResponse?.error?.code === 'CSRF_VALIDATION_FAILED',
+    'Returns structured CSRF_VALIDATION_FAILED error response'
+  );
+
+  // Valid CSRF check
+  const testToken = generateCsrfToken();
+  const validReq = {
+    method: 'POST',
+    path: '/api/resumes/123',
+    headers: { 'x-csrf-token': testToken, cookie: `resumex_csrf=${testToken}` },
+  } as any;
+  let validNextTriggered = false;
+  requireCsrf(validReq, mockMutatingRes, () => {
+    validNextTriggered = true;
+  });
+  assert(validNextTriggered, 'Accepts mutating request with matching CSRF cookie and header');
+
+  // --- Test Suite 16: Binary Executable Rejection & Magic Byte Inspection ---
+  console.log('\nTest Suite 16: Upload Security & Executable Binary Payload Rejection');
+  const fakeWinExe = Buffer.from([0x4d, 0x5a, 0x90, 0x00, 0x03, 0x00, 0x00, 0x00]); // MZ header
+  const winExeResult = UploadSecurity.validateUpload(fakeWinExe, 'resume.txt', 'text/plain');
+  assert(!winExeResult.isValid, 'Rejects Windows PE binary executable payload (.exe masked as .txt)');
+  assert(winExeResult.error?.includes('Windows executable binary signature detected') === true, 'Correctly reports executable signature violation');
+
+  const fakeElf = Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01, 0x01, 0x00]); // \x7fELF header
+  const elfResult = UploadSecurity.validateUpload(fakeElf, 'notes.txt', 'text/plain');
+  assert(!elfResult.isValid, 'Rejects Linux ELF binary executable disguised as text');
+
+  const oversizedBuffer = Buffer.alloc(11 * 1024 * 1024); // 11MB > 10MB limit
+  const oversizedResult = UploadSecurity.validateUpload(oversizedBuffer, 'huge.pdf', 'application/pdf');
+  assert(!oversizedResult.isValid, 'Rejects file exceeding 10MB maximum limit');
+
+  // --- Test Suite 17: Zero-Fabrication AI & Unsupported Claim Prevention ---
+  console.log('\nTest Suite 17: Zero-Fabrication Summary & Content Truth Verification');
+  const minimalResume: ResumeData = {
+    personal_info: { name: 'Taylor Swift', email: 'taylor@example.com', phone: '', location: '' },
+    summary: '',
+    experience: [
+      {
+        id: 'exp-1',
+        role: 'Full-Stack Developer',
+        company: 'Stripe',
+        location: 'San Francisco, CA',
+        startDate: '2021',
+        endDate: 'Present',
+        bullets: ['Built payment APIs'],
+      },
+    ],
+    education: [],
+    skills: [{ category: 'Languages', items: ['TypeScript', 'Node.js'] }],
+    projects: [],
+    certifications: [],
+    achievements: [],
+  };
+
+  const summaryGenResult = await optimizationEngine.optimizeSummary(
+    '',
+    'Senior Software Engineer',
+    minimalResume
+  );
+  assert(
+    !summaryGenResult.after.includes('technology organizations'),
+    'Does not inject "technology organizations" placeholder'
+  );
+  assert(
+    !summaryGenResult.after.includes('industry organizations'),
+    'Does not inject "industry organizations" placeholder'
+  );
+  assert(
+    !summaryGenResult.after.includes('accredited university'),
+    'Does not inject "accredited university" placeholder'
+  );
+  assert(
+    summaryGenResult.after.includes('Stripe'),
+    'Uses actual verified company from resume context'
+  );
+  assert(
+    summaryGenResult.after.includes('TypeScript'),
+    'Uses actual verified skills from resume context'
   );
 
   console.log('\n==========================================');

@@ -124,9 +124,13 @@ Respond in strict JSON with:
 
     if (isGeminiAvailable() && gemini) {
       try {
+        const companies = (resumeContext.experience || []).map((e) => `${e.role || e.title || 'Role'} at ${e.company || 'Organization'}`).filter(Boolean).join('; ');
         const prompt = `Elevate this professional resume summary for a target role of "${targetRole}".
-Adhere strictly to ResumeTruth: Do NOT invent companies, degrees, or unmentioned skills.
+Adhere strictly to Zero-Fabrication and ResumeTruth:
+- Do NOT invent companies, degrees, unmentioned skills, or metrics.
+- Only reference verified employment background and technical competencies provided below.
 Original summary: "${currentSummary}"
+Known experience: ${companies || 'None specified'}
 Known skills: ${resumeContext.skills.flatMap((s) => s.items).join(', ')}
 
 Return JSON:
@@ -159,14 +163,17 @@ Return JSON:
       const recentEdu = resumeContext.education && resumeContext.education.length > 0 ? resumeContext.education[0] : null;
 
       const roleTitle = recentExp ? (recentExp.role || recentExp.title) : undefined;
+      const companyClause = recentExp && recentExp.company ? ` at ${recentExp.company}` : '';
       if (recentExp && roleTitle && topSkills) {
-        proposed = `${targetRole || roleTitle} with professional background at ${recentExp.company || 'technology organizations'}. Technical competencies include ${topSkills}. Focused on disciplined engineering execution and software reliability.`;
+        proposed = `${targetRole || roleTitle} with professional background${companyClause}. Technical competencies include ${topSkills}. Focused on disciplined engineering execution and software reliability.`;
         reason = 'Formulated executive summary strictly referencing verified employment titles and recorded technical skills without unverified leadership or metric claims.';
       } else if (recentExp && roleTitle) {
-        proposed = `${targetRole || roleTitle} with experience at ${recentExp.company || 'industry organizations'}. Dedicated to high standards of technical precision and effective team collaboration.`;
+        proposed = `${targetRole || roleTitle} with experience${companyClause}. Dedicated to high standards of technical precision.`;
         reason = 'Summarized candidate background using exclusively verified role titles without fabricating metrics, team size, or scale.';
       } else if (recentEdu && topSkills) {
-        proposed = `Aspiring ${targetRole || 'Software Professional'} with foundational training in ${recentEdu.fieldOfStudy || recentEdu.field || recentEdu.degree || 'computer science'} from ${recentEdu.institution || 'accredited university'}. Practical skill set includes ${topSkills}.`;
+        const fieldClause = recentEdu.fieldOfStudy || recentEdu.field || recentEdu.degree ? ` in ${recentEdu.fieldOfStudy || recentEdu.field || recentEdu.degree}` : '';
+        const instClause = recentEdu.institution ? ` from ${recentEdu.institution}` : '';
+        proposed = `Aspiring ${targetRole || 'Software Professional'} with academic background${fieldClause}${instClause}. Practical skill set includes ${topSkills}.`;
         reason = 'Framed background as foundational/entry-level using exclusively provided academic credentials and verified skills.';
       } else if (topSkills) {
         proposed = `Practitioner with core competencies in ${topSkills}. Focused on contributing verified technical abilities toward ${targetRole || 'engineering objectives'}.`;

@@ -21,7 +21,11 @@ export function getGeminiClient(): GoogleGenAI | null {
 }
 
 export function getGeminiModel(): string {
-  return process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+  const model = process.env.GEMINI_MODEL;
+  if (!model || model === 'gemini-2.5-flash') {
+    return 'gemini-3.6-flash';
+  }
+  return model;
 }
 
 export function getGeminiEmbeddingModel(): string {

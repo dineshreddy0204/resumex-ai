@@ -203,7 +203,7 @@ export class UploadSecurity {
         isValid: false,
         sanitizedFileName,
         detectedFormat: 'pdf',
-        error: `File size exceeds the 15MB maximum limit (${(buffer.length / (1024 * 1024)).toFixed(1)}MB).`,
+        error: `File size exceeds the 10MB maximum limit (${(buffer.length / (1024 * 1024)).toFixed(1)}MB).`,
       };
     }
 

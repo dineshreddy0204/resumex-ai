@@ -10,10 +10,11 @@ export interface AuthenticatedRequest extends Request {
   tokenHash?: string;
 }
 
-// Security Enforcement: In production, JWT_SECRET is strictly mandatory.
+// Security Enforcement: In production runtime, JWT_SECRET is strictly mandatory and must be at least 32 characters.
 const isProduction = process.env.NODE_ENV === 'production';
-if (isProduction && !process.env.JWT_SECRET) {
-  throw new Error('Application startup failure: Required security configuration is missing (JWT_SECRET is required in production).');
+const isBuildStep = process.env.npm_lifecycle_event === 'build' || process.argv.some((arg) => arg.includes('build') || arg.includes('vite'));
+if (isProduction && !isBuildStep && (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32)) {
+  throw new Error('Application startup failure: Required security configuration is missing or insufficient (JWT_SECRET must be at least 32 characters in production).');
 }
 
 // In non-production, if JWT_SECRET is unset, generate an ephemeral cryptographically secure secret
@@ -175,11 +176,6 @@ export function csrfProtection(req: Request, res: Response, next: NextFunction):
     return next();
   }
 
-  // Exempt automated unit test executions if test header is explicitly set
-  if (process.env.NODE_ENV === 'test' && req.headers['x-test-suite'] === 'true') {
-    return next();
-  }
-
   const headerCsrf = (req.headers['x-csrf-token'] as string) || (req.headers['x-xsrf-token'] as string);
   const cookieCsrf = extractCsrfFromCookie(req);
 
@@ -197,6 +193,8 @@ export function csrfProtection(req: Request, res: Response, next: NextFunction):
 
   next();
 }
+
+export const requireCsrf = csrfProtection;
 
 /**
  * Hash password using bcrypt with work cost factor 12.

@@ -77,7 +77,7 @@ export class EmailService {
         console.log(`\n================== [DEV EMAIL SERVICE: VERIFICATION] ==================`);
         console.log(`To: ${email}`);
         console.log(`Verification URL: ${verifyUrl}`);
-        console.log(`Token: ${token}`);
+        console.log(`Token: [SCRUBBED_FOR_SECURITY]`);
         console.log(`=======================================================================\n`);
         return {
           sent: true,
@@ -131,7 +131,7 @@ export class EmailService {
         console.log(`\n================= [DEV EMAIL SERVICE: PASSWORD RESET] =================`);
         console.log(`To: ${email}`);
         console.log(`Reset URL: ${resetUrl}`);
-        console.log(`Token: ${token}`);
+        console.log(`Token: [SCRUBBED_FOR_SECURITY]`);
         console.log(`=======================================================================\n`);
         return {
           sent: true,

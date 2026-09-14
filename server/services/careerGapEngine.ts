@@ -169,7 +169,7 @@ export class CareerGapEngine {
       }
     }
 
-    const employmentGaps = this.analyzeEmploymentGaps(data);
+    const employmentGaps = this.analyzeEmploymentGaps(resume);
 
     return {
       targetRole,
