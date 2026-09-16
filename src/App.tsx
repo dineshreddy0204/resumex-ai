@@ -145,16 +145,6 @@ export default function App() {
           setUser(null);
           setProfile(null);
           currentUser = null;
-
-          // If demo login is enabled in dev, attempt demo login
-          try {
-            const demo = await api.demoLogin();
-            setUser(demo.user);
-            setProfile(demo.profile);
-            currentUser = demo.user;
-          } catch {
-            // Normal guest / landing mode
-          }
         }
       }
 
@@ -200,27 +190,12 @@ export default function App() {
           err.message.includes('HTTP 401'));
 
       if (isAuthError) {
-        // Reset auth state cleanly to avoid broken UI state or console error spam
+        // Reset auth state cleanly to transition to landing page without broken UI state
         setUser(null);
         setProfile(null);
         setActiveResume(null);
         setResumes([]);
         api.logout().catch(() => {});
-
-        // Try demo recovery if permitted
-        try {
-          const demo = await api.demoLogin();
-          setUser(demo.user);
-          setProfile(demo.profile);
-          const list = await api.getResumes();
-          setResumes(list);
-          if (list.length > 0) {
-            setActiveResume(list[0]);
-            await loadResumeAnalysis(list[0].id);
-          }
-        } catch {
-          // Graceful transition to unauthenticated landing view
-        }
       } else {
         console.error('Failed to load resumes:', err);
       }
