@@ -22,6 +22,7 @@ export default defineConfig(() => {
           const express = (await import('express')).default;
           const { apiRouter } = await import('./server/api');
           const app = express();
+          app.set('trust proxy', true);
           app.use(express.json({ limit: '50mb' }));
           app.get('/health', (_req, res) => {
             res.json({ status: 'healthy', timestamp: new Date().toISOString() });

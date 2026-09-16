@@ -2,20 +2,29 @@
  * ResumeX AI — Firebase Authentication & Google Sign-In Service
  *
  * Official Firebase Authentication integration via Google AI Studio.
- * Uses GoogleAuthProvider with signInWithPopup and inMemoryPersistence.
- * Strict Security Guarantees:
- * - Tokens are NEVER stored in localStorage or sessionStorage
- * - Server-side verification is mandatory before issuing ResumeX HttpOnly session cookies
- * - Clear diagnostics for unauthorized-domain and popup-blocked states
+ * Supports both signInWithPopup and signInWithRedirect + getRedirectResult().
+ *
+ * Strict Guarantees:
+ * - FirebaseApp initialized exactly once
+ * - Auth initialized exactly once
+ * - GoogleAuthProvider initialized exactly once
+ * - Never leaks or stores unverified credentials in localStorage
+ * - Tokens are immediately verified on the backend before session issuance
+ * - Distinct, exact error code handling for all Firebase Auth failure states
  */
 
 import { initializeApp, getApps, getApp, type FirebaseApp } from 'firebase/app';
 import {
   initializeAuth,
+  browserLocalPersistence,
+  indexedDBLocalPersistence,
   inMemoryPersistence,
+  browserPopupRedirectResolver,
   getAuth,
   GoogleAuthProvider,
   signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
   signOut,
   type Auth,
 } from 'firebase/auth';
@@ -34,25 +43,49 @@ export interface FirebaseAuthErrorDetails {
   message: string;
   isUnauthorizedDomain?: boolean;
   isPopupBlocked?: boolean;
+  isPopupClosed?: boolean;
   currentHostname?: string;
   authDomain?: string;
   actionRequired?: string;
+}
+
+export function isMobileDevice(): boolean {
+  if (typeof window === 'undefined' || typeof navigator === 'undefined') return false;
+  return (
+    /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+    (window.innerWidth <= 768 && 'ontouchstart' in window)
+  );
+}
+
+export function isEmbeddedInIframe(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.self !== window.top;
+  } catch {
+    return true;
+  }
 }
 
 class FirebaseAuthManager {
   private app: FirebaseApp | null = null;
   private auth: Auth | null = null;
   private provider: GoogleAuthProvider | null = null;
+  private redirectPromise: Promise<FirebaseAuthResult | null> | null = null;
 
   public getFirebaseConfig() {
-    return {
+    const config: Record<string, string> = {
       apiKey: firebaseConfig.apiKey || (import.meta as any).env?.VITE_FIREBASE_API_KEY || '',
       authDomain: firebaseConfig.authDomain || (import.meta as any).env?.VITE_FIREBASE_AUTH_DOMAIN || '',
       projectId: firebaseConfig.projectId || (import.meta as any).env?.VITE_FIREBASE_PROJECT_ID || '',
       appId: firebaseConfig.appId || (import.meta as any).env?.VITE_FIREBASE_APP_ID || '',
-      storageBucket: firebaseConfig.storageBucket || '',
-      messagingSenderId: firebaseConfig.messagingSenderId || '',
     };
+    if (firebaseConfig.storageBucket) {
+      config.storageBucket = firebaseConfig.storageBucket;
+    }
+    if (firebaseConfig.messagingSenderId) {
+      config.messagingSenderId = firebaseConfig.messagingSenderId;
+    }
+    return config;
   }
 
   public isConfigured(): boolean {
@@ -75,7 +108,10 @@ class FirebaseAuthManager {
     return '';
   }
 
-  private initAuth(): Auth {
+  /**
+   * Initializes FirebaseApp and Auth exactly once.
+   */
+  public initAuth(): Auth {
     if (this.auth) {
       return this.auth;
     }
@@ -85,15 +121,38 @@ class FirebaseAuthManager {
       throw new Error('Firebase configuration is incomplete. Missing apiKey or projectId.');
     }
 
-    this.app = getApps().length > 0 ? getApp() : initializeApp(config);
+    // Initialize FirebaseApp exactly once
+    if (!this.app) {
+      this.app = getApps().length > 0 ? getApp() : initializeApp(config);
+    }
 
-    // Initialize with inMemoryPersistence to enforce zero localStorage/sessionStorage token leakage
+    // Initialize Auth exactly once with indexedDB + browserLocal + inMemory persistence
+    // to support signInWithRedirect without state loss, while allowing immediate signOut cleanup
     try {
+      const persistenceList = [];
+      if (typeof window !== 'undefined') {
+        if (indexedDBLocalPersistence) persistenceList.push(indexedDBLocalPersistence);
+        if (browserLocalPersistence) persistenceList.push(browserLocalPersistence);
+      }
+      persistenceList.push(inMemoryPersistence);
+
       this.auth = initializeAuth(this.app, {
-        persistence: inMemoryPersistence,
+        persistence: persistenceList,
+        popupRedirectResolver: browserPopupRedirectResolver,
       });
     } catch {
       this.auth = getAuth(this.app);
+    }
+
+    return this.auth;
+  }
+
+  /**
+   * Initializes GoogleAuthProvider exactly once.
+   */
+  public getProvider(): GoogleAuthProvider {
+    if (this.provider) {
+      return this.provider;
     }
 
     this.provider = new GoogleAuthProvider();
@@ -101,28 +160,79 @@ class FirebaseAuthManager {
       prompt: 'select_account',
     });
 
-    return this.auth;
+    return this.provider;
+  }
+
+  /**
+   * Checks whether the user just returned from a Firebase redirect sign-in flow.
+   * Resolves with FirebaseAuthResult if credentials exist, or null if no redirect occurred.
+   */
+  public async getRedirectAuthResult(): Promise<FirebaseAuthResult | null> {
+    if (this.redirectPromise) {
+      return this.redirectPromise;
+    }
+
+    this.redirectPromise = (async () => {
+      const auth = this.initAuth();
+      try {
+        const result = await getRedirectResult(auth, browserPopupRedirectResolver);
+        if (!result || !result.user) {
+          return null;
+        }
+
+        const user = result.user;
+        const idToken = await user.getIdToken();
+
+        // Sign out of client-side Firebase Auth after extracting token for server verification
+        try {
+          await signOut(auth);
+        } catch {
+          // Non-blocking cleanup
+        }
+
+        return {
+          idToken,
+          email: user.email,
+          displayName: user.displayName,
+          photoURL: user.photoURL,
+        };
+      } catch (err: any) {
+        const parsed = this.parseError(err);
+        throw parsed;
+      }
+    })();
+
+    return this.redirectPromise;
+  }
+
+  /**
+   * Initiates Google Sign-In redirect flow via Firebase Authentication.
+   * Preferred on mobile browsers where popup windows are restricted or automatically closed.
+   */
+  public async signInWithGoogleRedirect(): Promise<void> {
+    const auth = this.initAuth();
+    const provider = this.getProvider();
+
+    try {
+      await signInWithRedirect(auth, provider, browserPopupRedirectResolver);
+    } catch (err: any) {
+      const parsed = this.parseError(err);
+      throw parsed;
+    }
   }
 
   /**
    * Initiates Google Sign-In popup flow via Firebase Authentication.
-   * Obtains cryptographic ID token directly from Firebase User object.
    */
-  public async signInWithGoogle(): Promise<FirebaseAuthResult> {
+  public async signInWithGooglePopup(): Promise<FirebaseAuthResult> {
     const auth = this.initAuth();
-    if (!this.provider) {
-      this.provider = new GoogleAuthProvider();
-      this.provider.setCustomParameters({
-        prompt: 'select_account',
-      });
-    }
+    const provider = this.getProvider();
 
     try {
-      const result = await signInWithPopup(auth, this.provider);
+      const result = await signInWithPopup(auth, provider, browserPopupRedirectResolver);
       const user = result.user;
       const idToken = await user.getIdToken();
 
-      // Clean up in-memory auth state after extracting token
       try {
         await signOut(auth);
       } catch {
@@ -136,69 +246,132 @@ class FirebaseAuthManager {
         photoURL: user.photoURL,
       };
     } catch (err: any) {
-      const parsedError = this.parseError(err);
-      throw parsedError;
+      const parsed = this.parseError(err);
+      throw parsed;
     }
   }
 
+  /**
+   * Main Google sign-in dispatcher.
+   * Defaults to popup, but caller can specify redirect or auto-detect based on device.
+   */
+  public async signInWithGoogle(flow: 'auto' | 'popup' | 'redirect' = 'auto'): Promise<FirebaseAuthResult | null> {
+    if (flow === 'redirect') {
+      await this.signInWithGoogleRedirect();
+      return null;
+    }
+
+    if (flow === 'auto' && isMobileDevice() && !isEmbeddedInIframe()) {
+      await this.signInWithGoogleRedirect();
+      return null;
+    }
+
+    return await this.signInWithGooglePopup();
+  }
+
+  /**
+   * Preserves exact Firebase error codes and translates to distinct, actionable error details.
+   * Logs safe non-sensitive diagnostic in development without leaking tokens or credentials.
+   */
   public parseError(err: any): FirebaseAuthErrorDetails {
-    const code = err?.code || 'auth/unknown';
+    const rawCode =
+      err?.code ||
+      (typeof err?.message === 'string' && err.message.match(/auth\/[a-z0-9-]+/i)?.[0]) ||
+      'auth/unknown';
+    const code = rawCode.toLowerCase();
     const rawMessage = err?.message || 'Authentication failed.';
     const currentHost = this.getCurrentHostname();
     const authDomain = this.getAuthDomain();
 
+    // Safe diagnostic log: contains only error code, host, and sanitized description (NO secrets or tokens)
+    if (typeof window !== 'undefined' && ((import.meta as any).env?.DEV || (window as any).__DEV__)) {
+      console.warn(`[FirebaseAuth Diagnostic] Code: ${code} | Host: ${currentHost} | Reason: ${rawMessage.split('\n')[0]}`);
+    }
+
     if (code === 'auth/unauthorized-domain') {
       return {
         code,
-        message: `This deployment domain (${currentHost}) is not in Firebase's Authorized Domains list.`,
+        message: `Domain "${currentHost}" is not in Firebase Authentication authorized domains list (auth/unauthorized-domain).`,
         isUnauthorizedDomain: true,
         currentHostname: currentHost,
         authDomain,
-        actionRequired: `Add "${currentHost}" to Firebase Console -> Authentication -> Settings -> Authorized domains.`,
+        actionRequired: `Add "${currentHost}" in Firebase Console -> Authentication -> Settings -> Authorized domains.`,
       };
     }
 
     if (code === 'auth/popup-blocked') {
       return {
         code,
-        message: 'The sign-in popup was blocked by your browser.',
+        message: 'The Google sign-in popup window was blocked by your browser (auth/popup-blocked).',
         isPopupBlocked: true,
-        actionRequired: 'Please allow popups for this site in your browser address bar and try again.',
+        actionRequired: 'Allow popups for this site in your browser settings, or use the Redirect sign-in option below.',
       };
     }
 
     if (code === 'auth/popup-closed-by-user') {
       return {
         code,
-        message: 'Sign-in cancelled: The Google authentication popup was closed before completing.',
+        message:
+          'The sign-in popup window was closed before completing authentication (auth/popup-closed-by-user). On mobile devices or inside iframes, browser popup windows can close automatically. Please use the Redirect sign-in option below.',
+        isPopupClosed: true,
+        actionRequired: 'Use the Redirect sign-in flow or open the application directly in a new tab.',
       };
     }
 
     if (code === 'auth/cancelled-popup-request') {
       return {
         code,
-        message: 'Another sign-in attempt is already in progress.',
-      };
-    }
-
-    if (code === 'auth/network-request-failed') {
-      return {
-        code,
-        message: 'Network connection failed. Please verify your internet connection and try again.',
+        message:
+          'A previous authentication request was cancelled or superseded by a new attempt (auth/cancelled-popup-request).',
+        actionRequired: 'Please wait a moment and try signing in again.',
       };
     }
 
     if (code === 'auth/operation-not-allowed') {
       return {
         code,
-        message: 'Google Sign-In is not enabled in your Firebase Authentication project.',
-        actionRequired: 'Enable Google under Firebase Console -> Authentication -> Sign-in method.',
+        message: 'Google Sign-In is not enabled in this Firebase Authentication project (auth/operation-not-allowed).',
+        actionRequired: 'Enable Google provider under Firebase Console -> Authentication -> Sign-in method.',
       };
     }
 
+    if (code === 'auth/invalid-oauth-client-id') {
+      return {
+        code,
+        message: 'The OAuth Client ID configured for Google Sign-In is invalid or mismatched (auth/invalid-oauth-client-id).',
+        actionRequired: 'Verify the Web Client ID in Firebase Console -> Authentication -> Sign-in method -> Google.',
+      };
+    }
+
+    if (code === 'auth/invalid-api-key') {
+      return {
+        code,
+        message: 'The Firebase API key is invalid or restricted (auth/invalid-api-key).',
+        actionRequired: 'Check the apiKey setting in your Firebase configuration.',
+      };
+    }
+
+    if (code === 'auth/invalid-argument' || code === 'auth/argument-error') {
+      return {
+        code,
+        message: 'Firebase authentication initialization failed due to an invalid argument (auth/invalid-argument).',
+        actionRequired: 'Reload the application and retry.',
+      };
+    }
+
+    if (code === 'auth/network-request-failed') {
+      return {
+        code,
+        message: 'Network error communicating with Firebase authentication servers (auth/network-request-failed).',
+        actionRequired: 'Check your internet connection, firewall, or ad-blocker and retry.',
+      };
+    }
+
+    // Default fallback: Preserve the EXACT code and message — NEVER mask as generic "cancelled"
     return {
       code,
-      message: rawMessage,
+      message: `${rawMessage} (${code})`,
+      actionRequired: 'Please try again or use email sign-in.',
     };
   }
 }

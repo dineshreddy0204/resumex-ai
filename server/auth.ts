@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import type { Request, Response, NextFunction } from 'express';
@@ -10,11 +12,31 @@ export interface AuthenticatedRequest extends Request {
   tokenHash?: string;
 }
 
-// JWT_SECRET handling: If provided, ensure it meets cryptographic entropy; if shorter than 32 chars, deterministically hash to 256 bits; if unset, generate an ephemeral 256-bit key.
+// JWT_SECRET handling: If provided, ensure it meets cryptographic entropy;
+// if unset, persist an ephemeral 256-bit key in .jwt_secret so dev server restarts
+// do not prematurely invalidate active user session cookies.
 let runtimeSecret = process.env.JWT_SECRET;
 if (!runtimeSecret) {
-  runtimeSecret = crypto.randomBytes(32).toString('hex');
-  console.warn('[Security] Notice: JWT_SECRET not set in environment. Generated ephemeral 256-bit key.');
+  const secretPath = path.join(process.cwd(), '.jwt_secret');
+  try {
+    if (fs.existsSync(secretPath)) {
+      const existing = fs.readFileSync(secretPath, 'utf8').trim();
+      if (existing && existing.length >= 32) {
+        runtimeSecret = existing;
+      }
+    }
+  } catch {
+    // Ignore file read failure
+  }
+
+  if (!runtimeSecret) {
+    runtimeSecret = crypto.randomBytes(32).toString('hex');
+    try {
+      fs.writeFileSync(secretPath, runtimeSecret, { encoding: 'utf8', mode: 0o600 });
+    } catch {
+      // Ignore file write failure in read-only environments
+    }
+  }
 } else if (runtimeSecret.length < 32) {
   // Deterministically derive a cryptographically strong 256-bit key from the provided secret
   runtimeSecret = crypto.createHash('sha256').update(runtimeSecret).digest('hex');
@@ -45,23 +67,37 @@ export function extractToken(req: Request): string | null {
 }
 
 /**
- * Determine cookie security attributes based on environment
+ * Determine cookie security attributes based on environment and request.
+ * When running in Cloud Run / Google AI Studio iframe previews or over HTTPS,
+ * SameSite=None + Secure + Partitioned is enforced so the browser doesn't block the cookie.
  */
-function getCookieSecuritySettings(): { sameSite: 'Lax' | 'None'; secure: boolean } {
+function getCookieSecuritySettings(req?: Request): { sameSite: 'Lax' | 'None'; secure: boolean; partitioned: boolean } {
   const isProd = process.env.NODE_ENV === 'production';
-  // SameSite=None is used ONLY if cross-site embedding is explicitly configured
-  const allowCrossSite = process.env.ENABLE_CROSS_SITE_IFRAME_COOKIES === 'true';
-  const sameSite: 'Lax' | 'None' = allowCrossSite ? 'None' : 'Lax';
-  const secure = isProd || allowCrossSite;
-  return { sameSite, secure };
+  const proto = req?.headers['x-forwarded-proto'] || (req?.secure ? 'https' : 'http');
+  const isHttps = proto === 'https' || isProd || Boolean(process.env.APP_URL?.startsWith('https'));
+  const isCloudRun = Boolean(
+    (typeof req?.headers.host === 'string' && req.headers.host.includes('.run.app')) ||
+    process.env.APP_URL?.includes('.run.app')
+  );
+
+  // Cross-site iframe compatibility (Google AI Studio Preview + Cloud Run)
+  const isIframeOrCrossSite =
+    process.env.ENABLE_CROSS_SITE_IFRAME_COOKIES === 'true' ||
+    isCloudRun ||
+    (isHttps && req?.headers['sec-fetch-dest'] === 'iframe');
+
+  const sameSite: 'Lax' | 'None' = isIframeOrCrossSite ? 'None' : (isHttps ? 'None' : 'Lax');
+  const secure = isHttps || isIframeOrCrossSite;
+  const partitioned = isIframeOrCrossSite || (isHttps && sameSite === 'None');
+  return { sameSite, secure, partitioned };
 }
 
 /**
  * Set secure HttpOnly session cookie
  */
-export function setAuthCookie(res: Response, token: string, _req?: Request): void {
+export function setAuthCookie(res: Response, token: string, req?: Request): void {
   const maxAgeMs = 7 * 24 * 60 * 60 * 1000; // 7 days
-  const { sameSite, secure } = getCookieSecuritySettings();
+  const { sameSite, secure, partitioned } = getCookieSecuritySettings(req);
 
   const cookieParts = [
     `resumex_token=${encodeURIComponent(token)}`,
@@ -73,6 +109,9 @@ export function setAuthCookie(res: Response, token: string, _req?: Request): voi
   if (secure) {
     cookieParts.push('Secure');
   }
+  if (partitioned) {
+    cookieParts.push('Partitioned');
+  }
   res.append('Set-Cookie', cookieParts.join('; '));
 }
 
@@ -80,7 +119,7 @@ export function setAuthCookie(res: Response, token: string, _req?: Request): voi
  * Clear session cookie on logout or invalidation
  */
 export function clearAuthCookie(res: Response, req?: Request): void {
-  const { sameSite, secure } = getCookieSecuritySettings();
+  const { sameSite, secure, partitioned } = getCookieSecuritySettings(req);
 
   const cookieParts = [
     'resumex_token=',
@@ -92,7 +131,12 @@ export function clearAuthCookie(res: Response, req?: Request): void {
   if (secure) {
     cookieParts.push('Secure');
   }
+  if (partitioned) {
+    cookieParts.push('Partitioned');
+  }
   res.append('Set-Cookie', cookieParts.join('; '));
+  // Also clear standard Lax unpartitioned fallback in case cookie originated from direct domain visit
+  res.append('Set-Cookie', 'resumex_token=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax');
   clearCsrfCookie(res, req);
 }
 
@@ -106,8 +150,8 @@ export function generateCsrfToken(): string {
 /**
  * Set client-accessible CSRF cookie for Double-Submit protection
  */
-export function setCsrfCookie(res: Response, token: string, _req?: Request): void {
-  const { sameSite, secure } = getCookieSecuritySettings();
+export function setCsrfCookie(res: Response, token: string, req?: Request): void {
+  const { sameSite, secure, partitioned } = getCookieSecuritySettings(req);
 
   const cookieParts = [
     `resumex_csrf=${encodeURIComponent(token)}`,
@@ -118,11 +162,14 @@ export function setCsrfCookie(res: Response, token: string, _req?: Request): voi
   if (secure) {
     cookieParts.push('Secure');
   }
+  if (partitioned) {
+    cookieParts.push('Partitioned');
+  }
   res.append('Set-Cookie', cookieParts.join('; '));
 }
 
-export function clearCsrfCookie(res: Response, _req?: Request): void {
-  const { sameSite, secure } = getCookieSecuritySettings();
+export function clearCsrfCookie(res: Response, req?: Request): void {
+  const { sameSite, secure, partitioned } = getCookieSecuritySettings(req);
 
   const cookieParts = [
     'resumex_csrf=',
@@ -133,7 +180,11 @@ export function clearCsrfCookie(res: Response, _req?: Request): void {
   if (secure) {
     cookieParts.push('Secure');
   }
+  if (partitioned) {
+    cookieParts.push('Partitioned');
+  }
   res.append('Set-Cookie', cookieParts.join('; '));
+  res.append('Set-Cookie', 'resumex_csrf=; Path=/; Max-Age=0; SameSite=Lax');
 }
 
 /**

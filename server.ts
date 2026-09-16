@@ -8,7 +8,7 @@ async function startServer() {
   const HOST = '0.0.0.0';
 
   // Trust proxy for reverse proxies (e.g. Cloud Run, Nginx, ALB)
-  app.set('trust proxy', 1);
+  app.set('trust proxy', true);
 
   // Global HTTP Security Headers & Content Security Policy (CSP)
   app.use((req, res, next) => {

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   X,
   Mail,
@@ -13,9 +13,15 @@ import {
   EyeOff,
   Copy,
   Check,
+  ExternalLink,
 } from 'lucide-react';
 import { api } from '../services/api';
-import { firebaseAuthManager, type FirebaseAuthErrorDetails } from '../services/firebaseAuth';
+import {
+  firebaseAuthManager,
+  isMobileDevice,
+  isEmbeddedInIframe,
+  type FirebaseAuthErrorDetails,
+} from '../services/firebaseAuth';
 import type { User, UserProfile } from '../types';
 
 interface AuthModalProps {
@@ -51,8 +57,17 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   // Loading & error
   const [loading, setLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [errorDetails, setErrorDetails] = useState<FirebaseAuthErrorDetails | null>(null);
   const [domainErrorInfo, setDomainErrorInfo] = useState<FirebaseAuthErrorDetails | null>(null);
+  const [showRedirectOption, setShowRedirectOption] = useState(false);
   const [copiedDomain, setCopiedDomain] = useState(false);
+  const [isMobile, setIsMobile] = useState(false);
+  const [isIframe, setIsIframe] = useState(false);
+
+  useEffect(() => {
+    setIsMobile(isMobileDevice());
+    setIsIframe(isEmbeddedInIframe());
+  }, []);
 
   if (!isOpen) return null;
 
@@ -131,14 +146,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     }
   };
 
-  const handleGoogleAuth = async () => {
+  const handleGoogleAuth = async (flow: 'auto' | 'popup' | 'redirect' = 'auto') => {
     setLoading(true);
     setErrorMessage(null);
+    setErrorDetails(null);
     setDomainErrorInfo(null);
 
     try {
-      // Authenticate with Google via official Firebase Authentication popup
-      const authResult = await firebaseAuthManager.signInWithGoogle();
+      const authResult = await firebaseAuthManager.signInWithGoogle(flow);
+      if (!authResult) {
+        // Redirect flow in progress: browser is redirecting
+        return;
+      }
 
       // Submit cryptographic ID token to ResumeX backend for server-side verification and session issuance
       const res = await api.googleAuth(authResult.idToken);
@@ -147,14 +166,42 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       onSuccess(res.user, res.profile);
       onClose();
     } catch (err: any) {
-      if (err.isUnauthorizedDomain) {
-        setDomainErrorInfo(err);
-      } else if (err.isPopupBlocked) {
-        setErrorMessage('The Google sign-in popup was blocked by your browser. Please allow popups for this site.');
-      } else if (err.code === 'auth/popup-closed-by-user') {
-        setErrorMessage('Google sign-in was cancelled. You can try again whenever you are ready.');
+      const parsedDetails: FirebaseAuthErrorDetails =
+        err && err.code && err.actionRequired ? err : firebaseAuthManager.parseError(err);
+      const errCode = parsedDetails.code;
+      setErrorDetails(parsedDetails);
+
+      // Safe non-sensitive diagnostic log in development
+      if (typeof window !== 'undefined' && ((import.meta as any).env?.DEV || (window as any).__DEV__)) {
+        console.warn(
+          `[Firebase Auth Debug] Code: ${errCode} | Host: ${window.location.hostname} | Message: ${parsedDetails.message}`
+        );
+      }
+
+      // Distinct handling for each of the 8 required Firebase error codes:
+      if (parsedDetails.isUnauthorizedDomain || errCode === 'auth/unauthorized-domain') {
+        setDomainErrorInfo(parsedDetails);
+      } else if (parsedDetails.isPopupBlocked || errCode === 'auth/popup-blocked') {
+        setErrorMessage(parsedDetails.message);
+        setShowRedirectOption(true);
+      } else if (parsedDetails.isPopupClosed || errCode === 'auth/popup-closed-by-user') {
+        setErrorMessage(parsedDetails.message);
+        setShowRedirectOption(true);
+      } else if (errCode === 'auth/cancelled-popup-request') {
+        setErrorMessage(parsedDetails.message);
+      } else if (errCode === 'auth/operation-not-allowed') {
+        setErrorMessage(parsedDetails.message);
+      } else if (errCode === 'auth/invalid-oauth-client-id') {
+        setErrorMessage(parsedDetails.message);
+      } else if (errCode === 'auth/invalid-api-key') {
+        setErrorMessage(parsedDetails.message);
+      } else if (errCode === 'auth/invalid-argument' || errCode === 'auth/argument-error') {
+        setErrorMessage(parsedDetails.message);
+      } else if (errCode === 'auth/network-request-failed') {
+        setErrorMessage(parsedDetails.message);
       } else {
-        setErrorMessage(err.message || 'Google authentication failed. Please try again or use email sign-in.');
+        // Never show a generic "cancelled" error — always preserve the exact error code
+        setErrorMessage(parsedDetails.message || `Google authentication failed (${errCode}).`);
       }
     } finally {
       setLoading(false);
@@ -280,9 +327,23 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
         {/* Error Notification */}
         {errorMessage && !domainErrorInfo && (
-          <div className="p-3 mb-4 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-800 flex items-start gap-2">
-            <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
-            <span>{errorMessage}</span>
+          <div className="p-3 mb-4 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-900 space-y-1.5">
+            <div className="flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+              <div className="flex-1 space-y-1">
+                {errorDetails?.code && (
+                  <div className="inline-block px-1.5 py-0.5 rounded bg-rose-200/70 text-rose-900 font-mono text-[10px] font-semibold">
+                    {errorDetails.code}
+                  </div>
+                )}
+                <p className="leading-relaxed text-[11px]">{errorMessage}</p>
+                {errorDetails?.actionRequired && (
+                  <p className="text-[10px] text-rose-700 font-medium">
+                    {errorDetails.actionRequired}
+                  </p>
+                )}
+              </div>
+            </div>
           </div>
         )}
 
@@ -444,7 +505,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             <button
               id="google-auth-btn"
               type="button"
-              onClick={handleGoogleAuth}
+              onClick={() => handleGoogleAuth('auto')}
               disabled={loading}
               className="w-full py-2.5 rounded-xl border border-[#D5D2C7] bg-white text-[#171713] text-xs font-medium hover:bg-[#FAF9F5] active:bg-[#F3EEDF] transition flex items-center justify-center gap-2 shadow-xs disabled:opacity-50 cursor-pointer"
             >
@@ -472,6 +533,34 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               )}
               <span>{loading ? 'Connecting with Google...' : 'Continue with Google'}</span>
             </button>
+
+            {/* Mobile / Popup-restricted environment: Redirect Sign-In option */}
+            {(showRedirectOption || isMobile) && (
+              <button
+                id="google-auth-redirect-btn"
+                type="button"
+                onClick={() => handleGoogleAuth('redirect')}
+                disabled={loading}
+                className="w-full py-2 rounded-xl border border-[#4F5D2F]/30 bg-[#4F5D2F]/5 text-[#4F5D2F] text-xs font-medium hover:bg-[#4F5D2F]/10 active:bg-[#4F5D2F]/20 transition flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <span>Continue with Google (Redirect Flow)</span>
+              </button>
+            )}
+
+            {/* In-iframe helper: direct link to open in new tab */}
+            {isIframe && (showRedirectOption || isMobile) && (
+              <button
+                id="open-new-tab-auth-btn"
+                type="button"
+                onClick={() => {
+                  window.open(window.location.href, '_blank');
+                }}
+                className="w-full py-1.5 rounded-xl border border-dashed border-[#D5D2C7] bg-[#FAF9F5] text-[#6E6E63] hover:text-[#171713] text-[11px] font-medium transition flex items-center justify-center gap-1.5 cursor-pointer"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                <span>Open in New Tab for Google Sign-In</span>
+              </button>
+            )}
 
             <button
               id="try-demo-auth-btn"

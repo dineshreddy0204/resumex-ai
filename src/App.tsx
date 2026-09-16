@@ -9,6 +9,7 @@ import type {
   TemplateDefinition,
 } from './types';
 import { api } from './services/api';
+import { firebaseAuthManager } from './services/firebaseAuth';
 import { Navbar, type NavTab } from './components/Navbar';
 import { Sidebar } from './components/Sidebar';
 import { LandingPage } from './components/LandingPage';
@@ -111,6 +112,25 @@ export default function App() {
         }
       }
 
+      // 2b. Check Firebase Google Redirect sign-in result
+      if (!urlHandledUser) {
+        try {
+          const redirectResult = await firebaseAuthManager.getRedirectAuthResult();
+          if (redirectResult) {
+            const authRes = await api.googleAuth(redirectResult.idToken);
+            setUser(authRes.user);
+            setProfile(authRes.profile);
+            urlHandledUser = authRes.user;
+            showToast('success', `Signed in with Google as ${authRes.user.name || authRes.user.email}`);
+          }
+        } catch (redirectErr: any) {
+          const errCode = redirectErr?.code || 'auth/redirect-error';
+          const errMsg = redirectErr?.message || 'Google redirect sign-in failed.';
+          console.warn(`[Firebase Auth] Redirect error: ${errCode} | ${errMsg}`);
+          showToast('error', `Google sign-in failed (${errCode}): ${errMsg}`);
+        }
+      }
+
       // 3. Auth state
       let currentUser: User | null = urlHandledUser;
       if (!currentUser) {
@@ -120,7 +140,13 @@ export default function App() {
           setProfile(me.profile);
           currentUser = me.user;
         } catch {
-          // No active session or token expired: if demo login is enabled, attempt demo login
+          // Stale or expired token: clear residual session state
+          api.logout().catch(() => {});
+          setUser(null);
+          setProfile(null);
+          currentUser = null;
+
+          // If demo login is enabled in dev, attempt demo login
           try {
             const demo = await api.demoLogin();
             setUser(demo.user);
@@ -164,9 +190,24 @@ export default function App() {
         setAtsResult(null);
       }
     } catch (err: any) {
-      console.error('Failed to load resumes:', err);
-      // Auto-heal session if authentication expired
-      if (err?.message && (err.message.includes('Authentication required') || err.message.includes('UNAUTHORIZED') || err.message.includes('TOKEN_INVALID'))) {
+      const isAuthError =
+        err?.message &&
+        (err.message.includes('Authentication required') ||
+          err.message.includes('UNAUTHORIZED') ||
+          err.message.includes('TOKEN_INVALID') ||
+          err.message.includes('expired or invalid') ||
+          err.message.includes('session has been signed out') ||
+          err.message.includes('HTTP 401'));
+
+      if (isAuthError) {
+        // Reset auth state cleanly to avoid broken UI state or console error spam
+        setUser(null);
+        setProfile(null);
+        setActiveResume(null);
+        setResumes([]);
+        api.logout().catch(() => {});
+
+        // Try demo recovery if permitted
         try {
           const demo = await api.demoLogin();
           setUser(demo.user);
@@ -177,9 +218,11 @@ export default function App() {
             setActiveResume(list[0]);
             await loadResumeAnalysis(list[0].id);
           }
-        } catch (retryErr) {
-          console.error('Session recovery failed:', retryErr);
+        } catch {
+          // Graceful transition to unauthenticated landing view
         }
+      } else {
+        console.error('Failed to load resumes:', err);
       }
     }
   };
