@@ -139,6 +139,30 @@ export class ResumeTruthEngine {
       }
     }
 
+    // 5b. Hallucinated Job Title / Seniority check
+    const candidateRoles = (resumeContext.experience || []).map((e) => (e.role || '').toLowerCase());
+    const hasSeniorRole = candidateRoles.some((r) =>
+      /\b(senior|lead|principal|staff|director|vp|head\s+of|manager|architect|chief)\b/i.test(r)
+    );
+
+    const seniorTitleRegex = /\b(senior|lead|principal|staff|director|vp|head of|manager|architect|chief)\s+(?:software\s+engineer|software\s+developer|developer|engineer|full\s*stack\s+developer|data\s+scientist|consultant|architect|manager)\b/gi;
+    const propSeniorMatches = proposedText.match(seniorTitleRegex) || [];
+    const origSeniorMatches = originalText.match(seniorTitleRegex) || [];
+
+    for (const sm of propSeniorMatches) {
+      const lowerSm = sm.toLowerCase();
+      const inOrig = origSeniorMatches.some((om) => om.toLowerCase().includes(lowerSm));
+      if (!inOrig && !hasSeniorRole) {
+        violations.push({
+          type: 'invented_title',
+          claim: sm,
+          severity: 'BLOCKER',
+          reason: `The proposed optimization introduces an unsupported seniority title ("${sm}") not backed by your verified work history.`,
+          questionToUser: `Have you held the official title "${sm}" in your career?`,
+        });
+      }
+    }
+
     // 6. Status determination
     let status: TruthVerificationStatus = 'VERIFIED';
     let verdict: TruthVerificationResult['verdict'] = 'PASS';
@@ -147,11 +171,11 @@ export class ResumeTruthEngine {
     if (violations.some((v) => v.severity === 'BLOCKER')) {
       status = 'BLOCKED_UNTRUTHFUL';
       verdict = 'BLOCKED';
-      explanation = 'Blocked: The rewrite introduces severe factual hallucinations (unverified degrees, employers, or certifications).';
+      explanation = 'Optimization rejected because it contains unsupported information.';
     } else if (violations.some((v) => v.type === 'fabricated_metric')) {
       status = 'FABRICATED_METRIC';
       verdict = 'REQUIRES_CONFIRMATION';
-      explanation = 'Flagged: Generated text contains specific metrics that must be verified before inclusion.';
+      explanation = 'Flagged: Generated text contains unverified metrics that require explicit confirmation.';
     } else if (violations.some((v) => v.type === 'invented_skill')) {
       status = 'UNSUPPORTED_CLAIM';
       verdict = 'REQUIRES_CONFIRMATION';

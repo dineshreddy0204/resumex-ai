@@ -367,3 +367,61 @@ export interface AuditEvent {
   details?: Record<string, unknown>;
   timestamp: string;
 }
+
+export interface TargetFieldIdentifier {
+  section: 'summary' | 'experience' | 'projects' | 'skills' | 'achievements' | 'certifications' | string;
+  id?: string;
+  bulletIdx?: number;
+  itemIdx?: number;
+  field?: string;
+  expIdx?: number;
+  projIdx?: number;
+}
+
+export interface TruthViolation {
+  type: 'fabricated_metric' | 'invented_skill' | 'invented_degree' | 'invented_certification' | 'invented_company' | 'invented_title' | 'unsupported_claim' | string;
+  claim: string;
+  severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'BLOCKER';
+  reason: string;
+  message?: string;
+  questionToUser?: string;
+}
+
+export interface OptimizationSuggestion {
+  id: string;
+  issueId?: string;
+  section: string;
+  fieldId?: string;
+  target?: TargetFieldIdentifier;
+  originalText?: string;
+  proposedText?: string;
+  before: string;
+  after: string;
+  reason: string;
+  confidence: number;
+  requires_user_confirmation: boolean;
+  truthCheckVerdict: 'PASS' | 'REQUIRES_CONFIRMATION' | 'BLOCKED';
+  truthStatus?: string;
+  truthQuestion?: string;
+  truthViolations?: TruthViolation[];
+  violationsExplanation?: string;
+}
+
+export interface EmailNotificationPreferences {
+  enabled: boolean;
+  categories: {
+    accountSecurity: boolean;
+    resumeAnalysis: boolean;
+    aiOptimization: boolean;
+    jobMatching: boolean;
+  };
+}
+
+export interface SmtpStatusResponse {
+  configured: boolean;
+  host?: string;
+  port?: number;
+  from?: string;
+  secure?: boolean;
+  message?: string;
+}

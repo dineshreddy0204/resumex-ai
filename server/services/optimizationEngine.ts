@@ -1,23 +1,38 @@
-import type { ResumeData, AnalysisIssue } from '../types';
+import type { ResumeData, AnalysisIssue, OptimizationSuggestion } from '../types';
 import { getGeminiClient, isGeminiAvailable, getGeminiModel } from '../gemini';
 import { resumeTruthEngine } from './resumeTruthEngine';
 import { achievementAnalyzer } from './achievementAnalyzer';
 
-export interface OptimizationSuggestion {
-  id: string;
-  issueId?: string;
-  section: string;
-  fieldId?: string;
-  before: string;
-  after: string;
-  reason: string;
-  confidence: number;
-  requires_user_confirmation: boolean;
-  truthCheckVerdict: 'PASS' | 'REQUIRES_CONFIRMATION' | 'BLOCKED';
-  truthQuestion?: string;
-}
-
 export class OptimizationEngine {
+  /**
+   * Deterministic, zero-fabrication rewrite that replaces weak openings
+   * with authoritative action verbs without inventing numbers or metrics.
+   */
+  public deterministicRewrite(bullet: string): string {
+    const trimmed = bullet.trim();
+    if (!trimmed) return trimmed;
+
+    let rewritten = trimmed
+      .replace(/^responsible for\s+(managing|leading|developing|building|creating|writing|designing|implementing)/i, (_m, p1) => {
+        return p1.charAt(0).toUpperCase() + p1.slice(1);
+      })
+      .replace(/^responsible for\s+/i, 'Led ')
+      .replace(/^helped (to\s+)?/i, 'Collaborated to ')
+      .replace(/^worked on\s+/i, 'Engineered ')
+      .replace(/^assisted with\s+/i, 'Contributed to ')
+      .replace(/^tasked with\s+/i, 'Executed ')
+      .replace(/^participated in\s+/i, 'Contributed directly to ')
+      .replace(/^duties included\s+/i, 'Delivered ');
+
+    rewritten = rewritten.charAt(0).toUpperCase() + rewritten.slice(1);
+
+    if (!rewritten.endsWith('.')) {
+      rewritten += '.';
+    }
+
+    return rewritten;
+  }
+
   /**
    * Optimize a specific bullet point using Action + Technology + Task + Result framework
    */
@@ -25,7 +40,9 @@ export class OptimizationEngine {
     bullet: string,
     roleTitle: string,
     company: string,
-    resumeContext: ResumeData
+    resumeContext: ResumeData,
+    entityId?: string,
+    bulletIdx?: number
   ): Promise<OptimizationSuggestion> {
     const gemini = getGeminiClient();
 
@@ -82,45 +99,127 @@ Respond in strict JSON with:
     return {
       id: `opt-${Date.now()}-${Math.random().toString(36).substring(7)}`,
       section: 'experience',
+      fieldId: entityId ? `exp-${entityId}-b${bulletIdx ?? 0}` : undefined,
+      target: {
+        section: 'experience',
+        id: entityId,
+        bulletIdx,
+      },
+      originalText: bullet,
+      proposedText: truthCheck.cleanOutput,
       before: bullet,
       after: truthCheck.cleanOutput,
       reason,
       confidence: 0.94,
       requires_user_confirmation: truthCheck.verdict !== 'PASS',
       truthCheckVerdict: truthCheck.verdict,
+      truthStatus: truthCheck.status,
+      truthViolations: truthCheck.violations,
+      violationsExplanation: truthCheck.explanation,
       truthQuestion: truthCheck.violations[0]?.questionToUser,
     };
   }
 
   /**
-   * Deterministic NLP rule-based rewrite that never hallucinates
+   * Rewrite project bullet without hallucination
    */
-  private deterministicRewrite(bullet: string): string {
-    let clean = bullet.trim();
+  public async rewriteProjectBullet(
+    bullet: string,
+    projectTitle: string,
+    technologies: string[],
+    resumeContext: ResumeData,
+    projectId?: string,
+    bulletIdx?: number
+  ): Promise<OptimizationSuggestion> {
+    const gemini = getGeminiClient();
+    let proposedText = '';
+    let reason = '';
 
-    // Replace weak phrases
-    clean = clean.replace(/^worked on\s+/i, 'Engineered solutions for ');
-    clean = clean.replace(/^helped with\s+/i, 'Facilitated the execution of ');
-    clean = clean.replace(/^responsible for\s+/i, 'Spearheaded and maintained ');
-    clean = clean.replace(/^assisted in\s+/i, 'Collaborated to implement ');
-    clean = clean.replace(/^handled\s+/i, 'Managed and optimized ');
-    clean = clean.replace(/^did\s+/i, 'Delivered ');
+    if (isGeminiAvailable() && gemini) {
+      try {
+        const prompt = `Optimize this project bullet for "${projectTitle}" using technologies [${technologies.join(', ')}].
+Adhere strictly to ResumeTruth:
+- NEVER invent new numbers, percentages, or unmentioned technologies.
+- Improve action verbs, architectural clarity, and task outcomes.
 
-    // Capitalize first letter
-    clean = clean.charAt(0).toUpperCase() + clean.slice(1);
-    // Ensure trailing period
-    if (!clean.endsWith('.')) clean += '.';
+Original bullet: "${bullet}"
 
-    return clean;
+Return JSON:
+{
+  "rewritten": "...",
+  "reason": "..."
+}`;
+        const response = await gemini.models.generateContent({
+          model: getGeminiModel(),
+          contents: prompt,
+          config: { responseMimeType: 'application/json' },
+        });
+        const parsed = JSON.parse(response.text || '{}');
+        if (parsed.rewritten) {
+          proposedText = parsed.rewritten;
+          reason = parsed.reason || 'Enhanced project impact and architectural clarity.';
+        }
+      } catch (err) {
+        console.warn('Gemini project bullet optimization failed:', err);
+      }
+    }
+
+    if (!proposedText) {
+      proposedText = this.deterministicRewrite(bullet);
+      reason = 'Strengthened action verb and technical phrasing using verified project facts.';
+    }
+
+    const truthCheck = resumeTruthEngine.verifyRewrite(bullet, proposedText, resumeContext);
+
+    return {
+      id: `opt-proj-${Date.now()}-${Math.random().toString(36).substring(7)}`,
+      section: 'projects',
+      fieldId: projectId ? `proj-${projectId}-b${bulletIdx ?? 0}` : undefined,
+      target: {
+        section: 'projects',
+        id: projectId,
+        bulletIdx,
+      },
+      originalText: bullet,
+      proposedText: truthCheck.cleanOutput,
+      before: bullet,
+      after: truthCheck.cleanOutput,
+      reason,
+      confidence: 0.94,
+      requires_user_confirmation: truthCheck.verdict !== 'PASS',
+      truthCheckVerdict: truthCheck.verdict,
+      truthStatus: truthCheck.status,
+      truthViolations: truthCheck.violations,
+      violationsExplanation: truthCheck.explanation,
+      truthQuestion: truthCheck.violations[0]?.questionToUser,
+    };
   }
 
   /**
    * Improve executive summary
    */
-  public async optimizeSummary(currentSummary: string, targetRole: string, resumeContext: ResumeData): Promise<OptimizationSuggestion> {
+  public async optimizeSummary(currentSummary: string, rawTargetRole: string, resumeContext: ResumeData): Promise<OptimizationSuggestion> {
     const gemini = getGeminiClient();
     let proposed = '';
     let reason = '';
+
+    // Check if candidate actually has verified senior roles in history
+    const candidateRoles = (resumeContext.experience || []).map((e) => (e.role || '').toLowerCase());
+    const hasSeniorRole = candidateRoles.some((r) =>
+      /\b(senior|lead|principal|staff|director|vp|head\s+of|manager|architect|chief)\b/i.test(r)
+    );
+
+    // Sanitize targetRole: if candidate has no senior experience, do not synthesize an unearned Senior title
+    let targetRole = (rawTargetRole || '').trim();
+    if (!targetRole) {
+      targetRole = resumeContext.experience?.[0]?.role || 'Software Engineer';
+    }
+    if (!hasSeniorRole) {
+      targetRole = targetRole.replace(/\b(senior|lead|principal|staff|director|vp|head\s+of|chief)\s+/gi, '').trim();
+      if (!targetRole) targetRole = 'Software Engineer';
+    }
+
+    const displayOriginal = (currentSummary || '').trim() || 'No existing content';
 
     if (isGeminiAvailable() && gemini) {
       try {
@@ -129,9 +228,9 @@ Respond in strict JSON with:
 Adhere strictly to Zero-Fabrication and ResumeTruth:
 - Do NOT invent companies, degrees, unmentioned skills, or metrics.
 - Only reference verified employment background and technical competencies provided below.
-Original summary: "${currentSummary}"
+Original summary: "${currentSummary || 'None provided'}"
 Known experience: ${companies || 'None specified'}
-Known skills: ${resumeContext.skills.flatMap((s) => s.items).join(', ')}
+Known skills: ${(resumeContext.skills || []).flatMap((s) => s.items).join(', ')}
 
 Return JSON:
 {
@@ -171,7 +270,7 @@ Return JSON:
         proposed = `${targetRole || roleTitle} with experience${companyClause}. Dedicated to high standards of technical precision.`;
         reason = 'Summarized candidate background using exclusively verified role titles without fabricating metrics, team size, or scale.';
       } else if (recentEdu && topSkills) {
-        const fieldClause = recentEdu.fieldOfStudy || recentEdu.field || recentEdu.degree ? ` in ${recentEdu.fieldOfStudy || recentEdu.field || recentEdu.degree}` : '';
+        const fieldClause = recentEdu.fieldOfStudy || recentEdu.degree ? ` in ${recentEdu.fieldOfStudy || recentEdu.degree}` : '';
         const instClause = recentEdu.institution ? ` from ${recentEdu.institution}` : '';
         proposed = `Aspiring ${targetRole || 'Software Professional'} with academic background${fieldClause}${instClause}. Practical skill set includes ${topSkills}.`;
         reason = 'Framed background as foundational/entry-level using exclusively provided academic credentials and verified skills.';
@@ -187,17 +286,27 @@ Return JSON:
       }
     }
 
-    const truthCheck = resumeTruthEngine.verifyRewrite(currentSummary, proposed, resumeContext);
+    const truthCheck = resumeTruthEngine.verifyRewrite(currentSummary || '', proposed, resumeContext);
 
     return {
       id: `opt-sum-${Date.now()}`,
       section: 'summary',
-      before: currentSummary,
+      fieldId: 'summary',
+      target: {
+        section: 'summary',
+      },
+      originalText: displayOriginal,
+      proposedText: truthCheck.cleanOutput,
+      before: displayOriginal,
       after: truthCheck.cleanOutput,
       reason,
       confidence: 0.92,
-      requires_user_confirmation: true,
+      requires_user_confirmation: truthCheck.verdict !== 'PASS',
       truthCheckVerdict: truthCheck.verdict,
+      truthStatus: truthCheck.status,
+      truthViolations: truthCheck.violations,
+      violationsExplanation: truthCheck.explanation,
+      truthQuestion: truthCheck.violations[0]?.questionToUser,
     };
   }
 

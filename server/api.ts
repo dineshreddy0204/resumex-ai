@@ -913,15 +913,17 @@ apiRouter.post('/resumes/:id/export', requireAuth, async (req: AuthenticatedRequ
 apiRouter.post('/resumes/:id/optimize/bullet', requireAuth, aiRateLimiter, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const resume = await db.getResume(req.user!.id, req.params.id);
-    const { bullet, roleTitle, company } = req.body;
+    const { bullet, roleTitle, company, entityId, bulletIdx } = req.body;
 
     if (!bullet) return sendStructuredError(res, 400, 'MISSING_BULLET', 'Bullet text is required.');
 
     const suggestion = await optimizationEngine.rewriteBullet(
       bullet,
-      roleTitle || 'Software Engineer',
-      company || 'Organization',
-      resume.data
+      roleTitle || resume.data.experience?.[0]?.role || 'Software Engineer',
+      company || resume.data.experience?.[0]?.company || 'Organization',
+      resume.data,
+      entityId,
+      bulletIdx
     );
 
     res.json({ suggestion });
@@ -931,14 +933,40 @@ apiRouter.post('/resumes/:id/optimize/bullet', requireAuth, aiRateLimiter, async
   }
 });
 
+apiRouter.post('/resumes/:id/optimize/project-bullet', requireAuth, aiRateLimiter, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const resume = await db.getResume(req.user!.id, req.params.id);
+    const { bullet, projectTitle, technologies, projectId, bulletIdx } = req.body;
+
+    if (!bullet) return sendStructuredError(res, 400, 'MISSING_BULLET', 'Bullet text is required.');
+
+    const suggestion = await optimizationEngine.rewriteProjectBullet(
+      bullet,
+      projectTitle || 'Project',
+      Array.isArray(technologies) ? technologies : [],
+      resume.data,
+      projectId,
+      bulletIdx
+    );
+
+    res.json({ suggestion });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Project optimization failed.';
+    sendStructuredError(res, 500, 'OPTIMIZE_PROJECT_FAILED', msg);
+  }
+});
+
 apiRouter.post('/resumes/:id/optimize/summary', requireAuth, aiRateLimiter, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const resume = await db.getResume(req.user!.id, req.params.id);
     const { currentSummary, targetRole } = req.body;
 
+    const summaryToOptimize = currentSummary !== undefined ? currentSummary : (resume.data.summary || '');
+    const candidateRole = targetRole || resume.data.experience?.[0]?.role || 'Software Engineer';
+
     const suggestion = await optimizationEngine.optimizeSummary(
-      currentSummary || resume.data.summary,
-      targetRole || 'Senior Software Engineer',
+      summaryToOptimize,
+      candidateRole,
       resume.data
     );
 
@@ -946,6 +974,114 @@ apiRouter.post('/resumes/:id/optimize/summary', requireAuth, aiRateLimiter, asyn
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Summary optimization failed.';
     sendStructuredError(res, 500, 'OPTIMIZE_SUMMARY_FAILED', msg);
+  }
+});
+
+// Email notification: Optimization Applied
+apiRouter.post('/notifications/optimization-applied', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { resumeTitle, section, detail } = req.body;
+    const user = req.user!;
+    const profile = await db.getProfileByUserId(user.id);
+    const prefs = (profile as any)?.preferences?.emailNotifications;
+
+    const result = await emailService.sendOptimizationAppliedNotification(
+      user.email,
+      user.name || 'Candidate',
+      resumeTitle || 'Resume',
+      section || 'General',
+      detail || 'Applied verified optimization improvements.',
+      prefs
+    );
+
+    res.json(result);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Notification dispatch failed.';
+    res.status(200).json({
+      success: false,
+      code: 'NOTIFICATION_DISPATCH_ERROR',
+      message: msg,
+    });
+  }
+});
+
+// Test Email endpoint for Settings verification
+apiRouter.post('/notifications/test-email', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const user = req.user!;
+    const result = await emailService.sendNotification({
+      to: user.email,
+      notificationType: 'account_notification',
+      subject: 'ResumeX AI — SMTP Notification Test',
+      text: `Hello ${user.name},\n\nThis is a test notification confirming that SMTP email delivery is operational for ResumeX AI Core Ultra.`,
+      html: `<div style="font-family: sans-serif; padding: 20px; color: #171713; background-color: #FAF9F5; border: 1px solid #EAE8E1; border-radius: 8px;"><h2 style="color: #4F5D2F;">ResumeX AI — SMTP Test</h2><p>Hello <strong>${user.name}</strong>,</p><p>This test email confirms your SMTP delivery pipeline is operational.</p></div>`,
+    });
+
+    res.json(result);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Test email failed.';
+    res.json({
+      success: false,
+      code: 'SMTP_TEST_FAILED',
+      message: msg,
+    });
+  }
+});
+
+// Get SMTP public status & diagnostic
+apiRouter.get('/settings/smtp-status', requireAuth, (req: AuthenticatedRequest, res: Response) => {
+  const status = emailService.getSmtpPublicConfig();
+  res.json(status);
+});
+
+// Email Notification Preferences
+apiRouter.get('/user/email-preferences', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const profile = await db.getProfileByUserId(req.user!.id);
+    const prefs = (profile as any)?.preferences?.emailNotifications || {
+      enabled: true,
+      categories: {
+        accountSecurity: true,
+        resumeAnalysis: true,
+        aiOptimization: true,
+        jobMatching: true,
+      },
+    };
+    res.json({ preferences: prefs });
+  } catch {
+    res.json({
+      preferences: {
+        enabled: true,
+        categories: {
+          accountSecurity: true,
+          resumeAnalysis: true,
+          aiOptimization: true,
+          jobMatching: true,
+        },
+      },
+    });
+  }
+});
+
+apiRouter.put('/user/email-preferences', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { preferences } = req.body;
+    const currentProfile = await db.getProfileByUserId(req.user!.id);
+    const existingPrefs = (currentProfile as any)?.preferences || {};
+    const updatedPreferences = {
+      ...existingPrefs,
+      emailNotifications: preferences,
+    };
+
+    await db.updateProfile(req.user!.id, {
+      ...currentProfile,
+      preferences: updatedPreferences,
+    } as any);
+
+    res.json({ success: true, preferences });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Failed to update preferences.';
+    sendStructuredError(res, 500, 'PREFERENCE_UPDATE_FAILED', msg);
   }
 });
 

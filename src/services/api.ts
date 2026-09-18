@@ -351,11 +351,27 @@ class ApiClient {
     resumeId: string,
     bullet: string,
     roleTitle?: string,
-    company?: string
+    company?: string,
+    entityId?: string,
+    bulletIdx?: number
   ): Promise<{ suggestion: OptimizationSuggestion }> {
     return this.request(`/resumes/${id(resumeId)}/optimize/bullet`, {
       method: 'POST',
-      body: JSON.stringify({ bullet, roleTitle, company }),
+      body: JSON.stringify({ bullet, roleTitle, company, entityId, bulletIdx }),
+    });
+  }
+
+  public async optimizeProjectBullet(
+    resumeId: string,
+    bullet: string,
+    projectTitle?: string,
+    technologies?: string[],
+    projectId?: string,
+    bulletIdx?: number
+  ): Promise<{ suggestion: OptimizationSuggestion }> {
+    return this.request(`/resumes/${id(resumeId)}/optimize/project-bullet`, {
+      method: 'POST',
+      body: JSON.stringify({ bullet, projectTitle, technologies, projectId, bulletIdx }),
     });
   }
 
@@ -367,6 +383,64 @@ class ApiClient {
     return this.request(`/resumes/${id(resumeId)}/optimize/summary`, {
       method: 'POST',
       body: JSON.stringify({ currentSummary, targetRole }),
+    });
+  }
+
+  // --- Notifications & Email Preferences ---
+  public async sendOptimizationNotification(payload: {
+    resumeTitle: string;
+    section: string;
+    detail: string;
+  }): Promise<{ success: boolean; code?: string; message: string; skipped?: boolean }> {
+    return this.request('/notifications/optimization-applied', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  public async testSmtpEmail(): Promise<{ success: boolean; code?: string; message: string }> {
+    return this.request('/notifications/test-email', {
+      method: 'POST',
+    });
+  }
+
+  public async getSmtpStatus(): Promise<{
+    configured: boolean;
+    host?: string;
+    port?: number;
+    from?: string;
+    secure?: boolean;
+    message: string;
+  }> {
+    return this.request('/settings/smtp-status');
+  }
+
+  public async getEmailPreferences(): Promise<{
+    preferences: {
+      enabled: boolean;
+      categories: {
+        accountSecurity: boolean;
+        resumeAnalysis: boolean;
+        aiOptimization: boolean;
+        jobMatching: boolean;
+      };
+    };
+  }> {
+    return this.request('/user/email-preferences');
+  }
+
+  public async updateEmailPreferences(preferences: {
+    enabled: boolean;
+    categories: {
+      accountSecurity: boolean;
+      resumeAnalysis: boolean;
+      aiOptimization: boolean;
+      jobMatching: boolean;
+    };
+  }): Promise<{ success: boolean; preferences: any }> {
+    return this.request('/user/email-preferences', {
+      method: 'PUT',
+      body: JSON.stringify({ preferences }),
     });
   }
 

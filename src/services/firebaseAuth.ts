@@ -26,7 +26,13 @@ import {
   signInWithRedirect,
   getRedirectResult,
   signOut,
+  createUserWithEmailAndPassword,
+  signInWithEmailAndPassword,
+  sendEmailVerification,
+  sendPasswordResetEmail,
+  updateProfile,
   type Auth,
+  type ActionCodeSettings,
 } from 'firebase/auth';
 
 import firebaseConfig from '../../firebase-applet-config.json';
@@ -267,6 +273,90 @@ class FirebaseAuthManager {
     }
 
     return await this.signInWithGooglePopup();
+  }
+
+  /**
+   * Creates a user account with email/password and dispatches Firebase verification email.
+   */
+  public async signUpWithEmail(
+    name: string,
+    email: string,
+    pass: string
+  ): Promise<{ user: any; requiresVerification: boolean }> {
+    const auth = this.initAuth();
+    const cred = await createUserWithEmailAndPassword(auth, email.trim(), pass);
+    if (name && cred.user) {
+      try {
+        await updateProfile(cred.user, { displayName: name.trim() });
+      } catch {
+        // Non-blocking displayName update
+      }
+    }
+
+    try {
+      const continueUrl = typeof window !== 'undefined' ? `${window.location.origin}/` : undefined;
+      const actionCodeSettings: ActionCodeSettings | undefined = continueUrl
+        ? { url: continueUrl, handleCodeInApp: true }
+        : undefined;
+      await sendEmailVerification(cred.user, actionCodeSettings);
+    } catch (e) {
+      console.warn('Firebase sendEmailVerification notice:', e);
+    }
+
+    return {
+      user: cred.user,
+      requiresVerification: true,
+    };
+  }
+
+  /**
+   * Signs in with email/password and validates that the email has been verified.
+   */
+  public async signInWithEmail(email: string, pass: string): Promise<FirebaseAuthResult> {
+    const auth = this.initAuth();
+    const cred = await signInWithEmailAndPassword(auth, email.trim(), pass);
+    await cred.user.reload();
+
+    if (!cred.user.emailVerified) {
+      const err: any = new Error('Please verify your email address before logging in.');
+      err.code = 'auth/email-not-verified';
+      throw err;
+    }
+
+    const idToken = await cred.user.getIdToken();
+    return {
+      idToken,
+      email: cred.user.email,
+      displayName: cred.user.displayName,
+      photoURL: cred.user.photoURL,
+    };
+  }
+
+  /**
+   * Sends password reset email using Firebase Auth Web API
+   */
+  public async sendPasswordReset(email: string): Promise<void> {
+    const auth = this.initAuth();
+    const continueUrl = typeof window !== 'undefined' ? `${window.location.origin}/` : undefined;
+    const actionCodeSettings: ActionCodeSettings | undefined = continueUrl
+      ? { url: continueUrl, handleCodeInApp: true }
+      : undefined;
+    await sendPasswordResetEmail(auth, email.trim(), actionCodeSettings);
+  }
+
+  /**
+   * Resends verification email to the currently signed in Firebase user
+   */
+  public async resendVerificationEmail(): Promise<void> {
+    const auth = this.initAuth();
+    if (!auth.currentUser) {
+      throw new Error('No user is currently signed in to resend verification email.');
+    }
+    const continueUrl = typeof window !== 'undefined' ? `${window.location.origin}/` : undefined;
+    const actionCodeSettings: ActionCodeSettings | undefined = continueUrl
+      ? { url: continueUrl, handleCodeInApp: true }
+      : undefined;
+    await sendEmailVerification(auth.currentUser, actionCodeSettings);
   }
 
   /**

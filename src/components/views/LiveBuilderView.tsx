@@ -1,5 +1,5 @@
 import React, { useState, useRef, useMemo, useEffect } from 'react';
-import type { ResumeDocument, TemplateDefinition, OptimizationSuggestion, ResumeData } from '../../types';
+import type { ResumeDocument, TemplateDefinition, OptimizationSuggestion, ResumeData, TargetFieldIdentifier } from '../../types';
 import { ResumeRenderer } from '../ResumeRenderer';
 import { api } from '../../services/api';
 import { MASTER_TEMPLATES, getFullTemplateCatalog } from '../../constants/templates';
@@ -117,16 +117,29 @@ export const LiveBuilderView: React.FC<LiveBuilderViewProps> = ({
 
   // --- AI Bullet Optimization with ResumeTruth Verification ---
   const handleTriggerOptimizeBullet = async (expIdx: number, bulletIdx: number) => {
-    const bullet = formData.experience[expIdx].bullets[bulletIdx];
-    const role = formData.experience[expIdx].role;
-    const company = formData.experience[expIdx].company;
+    const exp = formData.experience[expIdx];
+    const bullet = exp.bullets[bulletIdx];
+    const role = exp.role;
+    const company = exp.company;
+    const entityId = exp.id;
 
     setOptimizingBullet({ expIdx, bulletIdx });
     setUserTruthConfirmed(false);
 
     try {
-      const res = await api.optimizeBullet(resume.id, bullet, role, company);
-      setActiveSuggestion(res.suggestion);
+      const res = await api.optimizeBullet(resume.id, bullet, role, company, entityId, bulletIdx);
+      const suggestion: OptimizationSuggestion = {
+        ...res.suggestion,
+        target: {
+          section: 'experience',
+          id: entityId,
+          bulletIdx,
+          expIdx,
+        },
+        originalText: bullet,
+        proposedText: res.suggestion.proposedText || res.suggestion.after,
+      };
+      setActiveSuggestion(suggestion);
     } catch (err: any) {
       setToastMessage(err.message || 'Optimization request failed.');
       setTimeout(() => setToastMessage(null), 3000);
@@ -134,28 +147,172 @@ export const LiveBuilderView: React.FC<LiveBuilderViewProps> = ({
     }
   };
 
-  const handleApplySuggestion = () => {
-    if (!activeSuggestion || !optimizingBullet) return;
-    const { expIdx, bulletIdx } = optimizingBullet;
+  const handleTriggerOptimizeProjectBullet = async (projIdx: number, bulletIdx: number) => {
+    const proj = formData.projects[projIdx];
+    const bullet = proj.bullets[bulletIdx];
 
-    const updated = { ...formData };
-    updated.experience[expIdx].bullets[bulletIdx] = activeSuggestion.after;
-    setFormData(updated);
+    setOptimizingBullet(null);
+    setUserTruthConfirmed(false);
 
+    try {
+      const res = await api.optimizeProjectBullet(
+        resume.id,
+        bullet,
+        proj.title,
+        proj.technologies,
+        proj.id,
+        bulletIdx
+      );
+      const suggestion: OptimizationSuggestion = {
+        ...res.suggestion,
+        target: {
+          section: 'projects',
+          id: proj.id,
+          bulletIdx,
+          projIdx,
+        },
+        originalText: bullet,
+        proposedText: res.suggestion.proposedText || res.suggestion.after,
+      };
+      setActiveSuggestion(suggestion);
+    } catch (err: any) {
+      setToastMessage(err.message || 'Project optimization request failed.');
+      setTimeout(() => setToastMessage(null), 3000);
+    }
+  };
+
+  const handleApplySuggestion = async () => {
+    if (!activeSuggestion) return;
+
+    // Check if blocked by ResumeTruth verification
+    if (activeSuggestion.truthStatus === 'BLOCKED') {
+      setToastMessage('Cannot apply optimization: proposal contains unverified claims that violate ResumeTruth rules.');
+      setTimeout(() => setToastMessage(null), 3500);
+      return;
+    }
+
+    if (activeSuggestion.requires_user_confirmation && !userTruthConfirmed) {
+      setToastMessage('Please confirm candidate accuracy before applying this change.');
+      setTimeout(() => setToastMessage(null), 3500);
+      return;
+    }
+
+    const proposedValue = activeSuggestion.after || activeSuggestion.proposedText;
+    if (!proposedValue) return;
+
+    const updatedFormData: ResumeData = JSON.parse(JSON.stringify(formData));
+    let appliedSection = 'General';
+    let appliedDetail = '';
+
+    const target =
+      typeof activeSuggestion.target === 'object' && activeSuggestion.target !== null
+        ? (activeSuggestion.target as TargetFieldIdentifier)
+        : null;
+    const targetSection = target?.section || activeSuggestion.section;
+
+    if (targetSection === 'summary') {
+      updatedFormData.summary = proposedValue;
+      appliedSection = 'Professional Summary';
+      appliedDetail = `Updated executive summary: "${proposedValue.substring(0, 80)}..."`;
+    } else if (targetSection === 'projects') {
+      const projIdx =
+        target?.projIdx !== undefined
+          ? target.projIdx
+          : target?.id
+          ? updatedFormData.projects?.findIndex((p) => p.id === target.id)
+          : -1;
+      const bIdx = target?.bulletIdx ?? 0;
+
+      if (projIdx !== undefined && projIdx >= 0 && updatedFormData.projects?.[projIdx]?.bullets) {
+        updatedFormData.projects[projIdx].bullets[bIdx] = proposedValue;
+        const pTitle = updatedFormData.projects[projIdx].title || 'Project';
+        appliedSection = `Projects (${pTitle})`;
+        appliedDetail = `Optimized project bullet ${bIdx + 1}: "${proposedValue.substring(0, 75)}..."`;
+      }
+    } else {
+      // Experience section
+      const expIdx =
+        target?.expIdx !== undefined
+          ? target.expIdx
+          : optimizingBullet?.expIdx !== undefined
+          ? optimizingBullet.expIdx
+          : target?.id
+          ? updatedFormData.experience?.findIndex((e) => e.id === target.id)
+          : 0;
+      const bIdx = target?.bulletIdx ?? optimizingBullet?.bulletIdx ?? 0;
+
+      if (expIdx !== undefined && expIdx >= 0 && updatedFormData.experience?.[expIdx]?.bullets) {
+        updatedFormData.experience[expIdx].bullets[bIdx] = proposedValue;
+        const role = updatedFormData.experience[expIdx].role || updatedFormData.experience[expIdx].company || 'Experience';
+        appliedSection = `Experience (${role})`;
+        appliedDetail = `Optimized accomplishment bullet ${bIdx + 1}: "${proposedValue.substring(0, 75)}..."`;
+      }
+    }
+
+    // 1. Immediately update local state so Live Builder preview reflects changes
+    setFormData(updatedFormData);
     setActiveSuggestion(null);
     setOptimizingBullet(null);
+    setUserTruthConfirmed(false);
+
+    // 2. Persist to database via onUpdateResume
+    try {
+      setSaving(true);
+      await onUpdateResume(updatedFormData, resumeTitle, selectedTemplateId);
+      setSavedNotice(true);
+      setTimeout(() => setSavedNotice(false), 2500);
+
+      // 3. Dispatch secondary non-blocking email notification
+      try {
+        const notifRes = await api.sendOptimizationNotification({
+          resumeTitle: resumeTitle || resume.title || 'Resume',
+          section: appliedSection,
+          detail: appliedDetail,
+        });
+
+        if (notifRes.code === 'EMAIL_SENT' || (notifRes.success && !notifRes.skipped)) {
+          setToastMessage('Optimization applied to resume. Email notification sent.');
+        } else if (notifRes.code === 'NOTIFICATION_SKIPPED') {
+          setToastMessage('Optimization applied to resume.');
+        } else if (notifRes.code === 'EMAIL_NOT_CONFIGURED') {
+          setToastMessage('Resume updated. (Email notifications not configured)');
+        } else {
+          setToastMessage('Resume updated, but email notification could not be sent.');
+        }
+      } catch {
+        setToastMessage('Resume updated, but email notification could not be sent.');
+      }
+      setTimeout(() => setToastMessage(null), 3500);
+    } catch (saveErr: any) {
+      setToastMessage(`Failed to save optimization: ${saveErr.message || 'Database error'}`);
+      setTimeout(() => setToastMessage(null), 4000);
+    } finally {
+      setSaving(false);
+    }
   };
 
   // --- AI Summary Optimization ---
   const handleTriggerOptimizeSummary = async () => {
     setOptimizingSummary(true);
+    setUserTruthConfirmed(false);
     try {
+      const topRole = formData.experience?.[0]?.role || '';
+      const currentText = formData.summary || '';
       const res = await api.optimizeSummary(
         resume.id,
-        formData.summary || '',
-        formData.experience[0]?.role || 'Senior Software Engineer'
+        currentText,
+        topRole
       );
-      setActiveSuggestion(res.suggestion);
+      const original = currentText.trim();
+      const suggestion: OptimizationSuggestion = {
+        ...res.suggestion,
+        target: {
+          section: 'summary',
+        },
+        originalText: original || '(No existing summary)',
+        proposedText: res.suggestion.proposedText || res.suggestion.after,
+      };
+      setActiveSuggestion(suggestion);
     } catch (err: any) {
       setToastMessage(err.message || 'Summary optimization failed.');
       setTimeout(() => setToastMessage(null), 3000);
@@ -1397,14 +1554,23 @@ export const LiveBuilderView: React.FC<LiveBuilderViewProps> = ({
                             }}
                             className="w-full px-2.5 py-1.5 text-xs bg-white border border-[#D5D2C7] rounded-lg text-[#171713] focus:outline-none focus:ring-1 focus:ring-[#4F5D2F]"
                           />
-                          {(proj.bullets || []).length > 1 && (
+                          <div className="flex flex-col gap-1 shrink-0">
                             <button
-                              onClick={() => handleRemoveProjectBullet(projIdx, bIdx)}
-                              className="p-1 rounded text-[#6E6E63] hover:text-rose-600 hover:bg-rose-50 transition"
+                              title="Optimize project bullet with ResumeTruth Verification"
+                              onClick={() => handleTriggerOptimizeProjectBullet(projIdx, bIdx)}
+                              className="p-1 rounded bg-[#FAF9F5] hover:bg-[#F3EEDF] text-[#8E6D24] border border-[#C49A3A]/30 transition"
                             >
-                              <Trash2 className="w-3.5 h-3.5" />
+                              <Sparkles className="w-3.5 h-3.5 text-[#C49A3A]" />
                             </button>
-                          )}
+                            {(proj.bullets || []).length > 1 && (
+                              <button
+                                onClick={() => handleRemoveProjectBullet(projIdx, bIdx)}
+                                className="p-1 rounded text-[#6E6E63] hover:text-rose-600 hover:bg-rose-50 transition"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
                         </div>
                       ))}
                     </div>
@@ -1553,56 +1719,95 @@ export const LiveBuilderView: React.FC<LiveBuilderViewProps> = ({
 
             {/* ResumeTruth Verdict Banner */}
             <div
-              className={`p-3 rounded-lg text-xs border ${
-                activeSuggestion.truthCheckVerdict === 'PASS'
+              className={`p-3.5 rounded-xl text-xs border ${
+                activeSuggestion.truthStatus === 'BLOCKED'
+                  ? 'bg-rose-50 text-rose-800 border-rose-200'
+                  : activeSuggestion.truthStatus === 'PASS' || activeSuggestion.truthCheckVerdict === 'PASS'
                   ? 'bg-[#4F5D2F]/10 text-[#4F5D2F] border-[#4F5D2F]/30'
                   : 'bg-[#FAF9F5] text-[#8E6D24] border-[#C49A3A]/40'
               }`}
             >
-              <div className="font-bold flex items-center gap-1.5">
-                <CheckCircle2 className="w-4 h-4 shrink-0" />
-                ResumeTruth Anti-Hallucination Status:{' '}
-                {activeSuggestion.truthCheckVerdict === 'PASS'
-                  ? 'VERIFIED COMPLIANT'
+              <div className="font-bold flex items-center gap-1.5 text-xs">
+                {activeSuggestion.truthStatus === 'BLOCKED' ? (
+                  <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
+                ) : (
+                  <CheckCircle2 className="w-4 h-4 shrink-0" />
+                )}
+                ResumeTruth Verification:{' '}
+                {activeSuggestion.truthStatus === 'BLOCKED'
+                  ? 'PROPOSAL BLOCKED (Fabrication Detected)'
+                  : activeSuggestion.truthStatus === 'PASS' || activeSuggestion.truthCheckVerdict === 'PASS'
+                  ? 'VERIFIED COMPLIANT (Zero-Fabrication)'
                   : 'CANDIDATE CONFIRMATION REQUIRED'}
               </div>
-              <div className="text-[11px] mt-1 opacity-90">{activeSuggestion.reason}</div>
+              <div className="text-[11px] mt-1.5 opacity-90 leading-relaxed">
+                {activeSuggestion.violationsExplanation || activeSuggestion.reason}
+              </div>
             </div>
 
+            {/* Flagged Violations Breakdown */}
+            {activeSuggestion.truthViolations && activeSuggestion.truthViolations.length > 0 && (
+              <div className="p-3 rounded-lg bg-amber-50/70 border border-amber-200 text-xs space-y-1.5">
+                <div className="font-semibold text-amber-900 text-[11px] uppercase tracking-wider">
+                  Verification Items:
+                </div>
+                {activeSuggestion.truthViolations.map((v, i) => (
+                  <div key={i} className="text-amber-800 text-[11px] flex items-start gap-1.5">
+                    <span className="font-mono font-bold shrink-0 bg-amber-200/80 px-1 py-0.5 rounded text-[10px]">
+                      [{v.type.replace('_', ' ').toUpperCase()}]
+                    </span>
+                    <span>{v.message || v.reason || v.claim}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
             {/* Before vs After */}
-            <div className="space-y-2 text-xs">
+            <div className="space-y-3 text-xs">
               <div>
-                <span className="font-bold text-[#6E6E63] text-[11px]">Original Text:</span>
-                <div className="p-2.5 rounded bg-[#FAF9F5] text-[#6E6E63] border border-[#EAE8E1] line-through">
-                  {activeSuggestion.before}
+                <span className="font-bold text-[#6E6E63] text-[11px] block mb-1">Original Text:</span>
+                <div className="p-2.5 rounded-lg bg-[#FAF9F5] text-[#6E6E63] border border-[#EAE8E1]">
+                  {(() => {
+                    const orig = (activeSuggestion.originalText ?? activeSuggestion.before ?? '').trim();
+                    if (!orig || orig === 'No existing content' || orig === '(No existing summary)') {
+                      return (
+                        <span className="italic text-[#9E9E90]">
+                          (No existing content in this section — verified optimization will be inserted)
+                        </span>
+                      );
+                    }
+                    return <span className="line-through">{orig}</span>;
+                  })()}
                 </div>
               </div>
 
               <div>
-                <span className="font-bold text-[#4F5D2F] text-[11px]">Proposed Optimization:</span>
-                <div className="p-2.5 rounded bg-white text-[#171713] border border-[#4F5D2F]/40 font-medium">
-                  {activeSuggestion.after}
+                <span className="font-bold text-[#4F5D2F] text-[11px] block mb-1">Proposed Optimization:</span>
+                <div className="p-2.5 rounded-lg bg-white text-[#171713] border border-[#4F5D2F]/40 font-medium leading-relaxed">
+                  {activeSuggestion.proposedText || activeSuggestion.after}
                 </div>
               </div>
             </div>
 
             {/* If unverified claims exist, prompt candidate */}
-            {activeSuggestion.truthQuestion && (
+            {(activeSuggestion.truthQuestion || (activeSuggestion.truthViolations && activeSuggestion.truthViolations.length > 0)) && (
               <div className="p-3.5 rounded-lg bg-[#FAF9F5] border border-[#C49A3A]/40 space-y-2 text-xs">
                 <div className="flex items-center gap-1.5 text-[#8E6D24] font-semibold">
                   <AlertCircle className="w-3.5 h-3.5" />
-                  <span>Verification Prompt:</span>
+                  <span>Candidate Verification Required:</span>
                 </div>
-                <p className="text-[#6E6E63]">{activeSuggestion.truthQuestion}</p>
-                <label className="flex items-center gap-2 text-[#171713] cursor-pointer pt-1">
+                <p className="text-[#6E6E63] leading-relaxed">
+                  {activeSuggestion.truthQuestion || 'Please verify that the proposed phrasing accurately reflects your verifiable skills and background.'}
+                </p>
+                <label className="flex items-start gap-2 text-[#171713] cursor-pointer pt-1">
                   <input
                     type="checkbox"
                     checked={userTruthConfirmed}
                     onChange={(e) => setUserTruthConfirmed(e.target.checked)}
-                    className="rounded text-[#4F5D2F] focus:ring-[#4F5D2F]"
+                    className="mt-0.5 rounded text-[#4F5D2F] focus:ring-[#4F5D2F]"
                   />
-                  <span className="text-[11px] font-medium">
-                    I verify that this metric or tool accurately reflects my true experience.
+                  <span className="text-[11px] font-medium leading-snug">
+                    I verify that this information accurately represents my true experience and qualifications.
                   </span>
                 </label>
               </div>
@@ -1611,15 +1816,22 @@ export const LiveBuilderView: React.FC<LiveBuilderViewProps> = ({
             {/* Action buttons */}
             <div className="flex justify-end gap-2 pt-2 border-t border-[#EAE8E1]">
               <button
-                onClick={() => setActiveSuggestion(null)}
-                className="px-3 py-1.5 rounded-lg text-xs text-[#6E6E63] hover:text-[#171713]"
+                onClick={() => {
+                  setActiveSuggestion(null);
+                  setUserTruthConfirmed(false);
+                }}
+                className="px-3.5 py-1.5 rounded-lg text-xs text-[#6E6E63] hover:text-[#171713] transition font-medium"
               >
                 Reject
               </button>
               <button
                 onClick={handleApplySuggestion}
-                disabled={activeSuggestion.truthCheckVerdict !== 'PASS' && !userTruthConfirmed}
-                className="px-4 py-2 rounded-lg bg-[#4F5D2F] hover:bg-[#37421F] text-white text-xs font-semibold disabled:opacity-50 transition shadow-xs"
+                disabled={
+                  activeSuggestion.truthStatus === 'BLOCKED' ||
+                  (activeSuggestion.truthStatus === 'REQUIRES_CONFIRMATION' && !userTruthConfirmed) ||
+                  (activeSuggestion.requires_user_confirmation && !userTruthConfirmed)
+                }
+                className="px-4 py-2 rounded-lg bg-[#4F5D2F] hover:bg-[#37421F] text-white text-xs font-semibold disabled:opacity-50 transition shadow-xs cursor-pointer disabled:cursor-not-allowed"
               >
                 Apply to Resume
               </button>
