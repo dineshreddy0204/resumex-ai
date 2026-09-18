@@ -1,4 +1,4 @@
-import React, { useState, useRef, useMemo } from 'react';
+import React, { useState, useRef, useMemo, useEffect } from 'react';
 import type { ResumeDocument, TemplateDefinition, OptimizationSuggestion, ResumeData } from '../../types';
 import { ResumeRenderer } from '../ResumeRenderer';
 import { api } from '../../services/api';
@@ -53,6 +53,15 @@ export const LiveBuilderView: React.FC<LiveBuilderViewProps> = ({
   const [savedNotice, setSavedNotice] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
+  // Sync internal state whenever active resume updates (e.g., following PDF upload or refresh)
+  useEffect(() => {
+    if (resume && resume.data) {
+      setFormData(JSON.parse(JSON.stringify(resume.data)));
+      setResumeTitle(resume.title || 'Untitled Resume');
+      setSelectedTemplateId(resume.templateId || 'ats-classic');
+    }
+  }, [resume?.id, resume?.updatedAt, JSON.stringify(resume?.data)]);
+
   // Accordion collapsed state for sections
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({
     contact: false,
@@ -60,6 +69,9 @@ export const LiveBuilderView: React.FC<LiveBuilderViewProps> = ({
     experience: false,
     skills: false,
     education: false,
+    projects: false,
+    certifications: false,
+    achievements: false,
   });
 
   // AI Optimization modal state
@@ -473,6 +485,124 @@ export const LiveBuilderView: React.FC<LiveBuilderViewProps> = ({
   const handleRemoveBullet = (expIdx: number, bulletIdx: number) => {
     const updated = { ...formData };
     updated.experience[expIdx].bullets.splice(bulletIdx, 1);
+    setFormData(updated);
+  };
+
+  // Education handlers
+  const handleAddEducation = () => {
+    setFormData({
+      ...formData,
+      education: [
+        {
+          id: `edu-${Date.now()}`,
+          degree: 'Degree / Program',
+          institution: 'Institution / University',
+          fieldOfStudy: 'Field of Study',
+          startDate: '2020',
+          endDate: '2024',
+        },
+        ...(formData.education || []),
+      ],
+    });
+  };
+
+  const handleRemoveEducation = (eduIdx: number) => {
+    const updated = { ...formData };
+    updated.education = (updated.education || []).filter((_, idx) => idx !== eduIdx);
+    setFormData(updated);
+  };
+
+  // Skills handlers
+  const handleAddSkillCategory = () => {
+    setFormData({
+      ...formData,
+      skills: [
+        ...(formData.skills || []),
+        {
+          category: 'Technical Skills',
+          items: ['Skill 1', 'Skill 2'],
+        },
+      ],
+    });
+  };
+
+  const handleRemoveSkillCategory = (catIdx: number) => {
+    const updated = { ...formData };
+    updated.skills = (updated.skills || []).filter((_, idx) => idx !== catIdx);
+    setFormData(updated);
+  };
+
+  const handleAddSkillItem = (catIdx: number, itemText: string) => {
+    const clean = itemText.trim();
+    if (!clean) return;
+    const updated = { ...formData };
+    if (!updated.skills[catIdx].items.includes(clean)) {
+      updated.skills[catIdx].items.push(clean);
+      setFormData(updated);
+    }
+  };
+
+  const handleRemoveSkillItem = (catIdx: number, itemIdx: number) => {
+    const updated = { ...formData };
+    updated.skills[catIdx].items.splice(itemIdx, 1);
+    setFormData(updated);
+  };
+
+  // Projects handlers
+  const handleAddProject = () => {
+    setFormData({
+      ...formData,
+      projects: [
+        {
+          id: `proj-${Date.now()}`,
+          title: 'Project Name',
+          link: '',
+          technologies: ['TypeScript', 'React'],
+          bullets: ['Engineered resilient architecture that streamlined critical workflows.'],
+        },
+        ...(formData.projects || []),
+      ],
+    });
+  };
+
+  const handleRemoveProject = (projIdx: number) => {
+    const updated = { ...formData };
+    updated.projects = (updated.projects || []).filter((_, idx) => idx !== projIdx);
+    setFormData(updated);
+  };
+
+  const handleAddProjectBullet = (projIdx: number) => {
+    const updated = { ...formData };
+    if (!updated.projects[projIdx].bullets) updated.projects[projIdx].bullets = [];
+    updated.projects[projIdx].bullets.push('Spearheaded key project capability with observable metrics.');
+    setFormData(updated);
+  };
+
+  const handleRemoveProjectBullet = (projIdx: number, bulletIdx: number) => {
+    const updated = { ...formData };
+    updated.projects[projIdx].bullets.splice(bulletIdx, 1);
+    setFormData(updated);
+  };
+
+  // Certifications handlers
+  const handleAddCertification = () => {
+    setFormData({
+      ...formData,
+      certifications: [
+        {
+          id: `cert-${Date.now()}`,
+          name: 'Certificate Name',
+          issuer: 'Certifying Body',
+          date: new Date().getFullYear().toString(),
+        },
+        ...(formData.certifications || []),
+      ],
+    });
+  };
+
+  const handleRemoveCertification = (certIdx: number) => {
+    const updated = { ...formData };
+    updated.certifications = (updated.certifications || []).filter((_, idx) => idx !== certIdx);
     setFormData(updated);
   };
 
@@ -962,6 +1092,408 @@ export const LiveBuilderView: React.FC<LiveBuilderViewProps> = ({
                           </div>
                         </div>
                       ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Section 4: Skills & Competencies */}
+          <div className="p-4 rounded-xl bg-white border border-[#EAE8E1] shadow-xs space-y-4">
+            <div className="flex justify-between items-center">
+              <div
+                className="flex items-center gap-2 cursor-pointer select-none"
+                onClick={() => toggleSection('skills')}
+              >
+                <h3 className="text-xs font-bold text-[#171713] uppercase tracking-wider">
+                  Skills & Technical Domains ({(formData.skills || []).length} categories)
+                </h3>
+                {collapsedSections.skills ? (
+                  <ChevronDown className="w-4 h-4 text-[#6E6E63]" />
+                ) : (
+                  <ChevronUp className="w-4 h-4 text-[#6E6E63]" />
+                )}
+              </div>
+              <button
+                onClick={handleAddSkillCategory}
+                className="px-2.5 py-1 rounded bg-[#FAF9F5] hover:bg-white text-[#171713] text-[11px] font-semibold border border-[#D5D2C7] flex items-center gap-1 transition shadow-2xs"
+              >
+                <Plus className="w-3 h-3 text-[#4F5D2F]" />
+                <span>Add Category</span>
+              </button>
+            </div>
+
+            {!collapsedSections.skills && (
+              <div className="space-y-3">
+                {(formData.skills || []).map((cat, catIdx) => (
+                  <div key={catIdx} className="p-3.5 rounded-lg bg-[#FAF9F5] border border-[#EAE8E1] space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <input
+                        type="text"
+                        value={cat.category}
+                        onChange={(e) => {
+                          const updated = { ...formData };
+                          updated.skills[catIdx].category = e.target.value;
+                          setFormData(updated);
+                        }}
+                        placeholder="Category Name (e.g. Languages & Frameworks)"
+                        className="font-semibold text-xs text-[#171713] bg-white border border-[#D5D2C7] rounded px-2 py-1 flex-1 focus:outline-none focus:ring-1 focus:ring-[#4F5D2F]"
+                      />
+                      <button
+                        onClick={() => handleRemoveSkillCategory(catIdx)}
+                        className="p-1 rounded text-[#6E6E63] hover:text-rose-600 hover:bg-rose-50 transition"
+                        title="Delete category"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+
+                    {/* Skill tags */}
+                    <div className="flex flex-wrap gap-1.5 pt-1">
+                      {(cat.items || []).map((item, itemIdx) => (
+                        <span
+                          key={itemIdx}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white border border-[#D5D2C7] text-xs text-[#171713]"
+                        >
+                          <span>{item}</span>
+                          <button
+                            onClick={() => handleRemoveSkillItem(catIdx, itemIdx)}
+                            className="text-[#6E6E63] hover:text-rose-600 ml-0.5 font-bold"
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+
+                    {/* Add skill input */}
+                    <div className="flex items-center gap-1.5 pt-1">
+                      <input
+                        type="text"
+                        placeholder="Add skill (press Enter or comma)"
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ',') {
+                            e.preventDefault();
+                            const val = (e.currentTarget.value || '').trim();
+                            if (val) {
+                              handleAddSkillItem(catIdx, val);
+                              e.currentTarget.value = '';
+                            }
+                          }
+                        }}
+                        className="text-xs bg-white border border-[#D5D2C7] rounded px-2 py-1 text-[#171713] w-56 focus:outline-none focus:ring-1 focus:ring-[#4F5D2F]"
+                      />
+                      <span className="text-[10px] text-[#6E6E63]">Type and press Enter</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Section 5: Education */}
+          <div className="p-4 rounded-xl bg-white border border-[#EAE8E1] shadow-xs space-y-4">
+            <div className="flex justify-between items-center">
+              <div
+                className="flex items-center gap-2 cursor-pointer select-none"
+                onClick={() => toggleSection('education')}
+              >
+                <h3 className="text-xs font-bold text-[#171713] uppercase tracking-wider">
+                  Education ({(formData.education || []).length})
+                </h3>
+                {collapsedSections.education ? (
+                  <ChevronDown className="w-4 h-4 text-[#6E6E63]" />
+                ) : (
+                  <ChevronUp className="w-4 h-4 text-[#6E6E63]" />
+                )}
+              </div>
+              <button
+                onClick={handleAddEducation}
+                className="px-2.5 py-1 rounded bg-[#FAF9F5] hover:bg-white text-[#171713] text-[11px] font-semibold border border-[#D5D2C7] flex items-center gap-1 transition shadow-2xs"
+              >
+                <Plus className="w-3 h-3 text-[#4F5D2F]" />
+                <span>Add Education</span>
+              </button>
+            </div>
+
+            {!collapsedSections.education && (
+              <div className="space-y-3">
+                {(formData.education || []).map((edu, eduIdx) => (
+                  <div key={edu.id} className="p-4 rounded-lg bg-[#FAF9F5] border border-[#EAE8E1] space-y-3">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                      <div className="sm:col-span-2">
+                        <label className="text-[10px] text-[#6E6E63] font-medium">Degree / Program</label>
+                        <input
+                          type="text"
+                          value={edu.degree}
+                          onChange={(e) => {
+                            const updated = { ...formData };
+                            updated.education[eduIdx].degree = e.target.value;
+                            setFormData(updated);
+                          }}
+                          className="w-full mt-0.5 px-2 py-1 bg-white border border-[#D5D2C7] rounded text-[#171713] text-xs focus:outline-none focus:ring-1 focus:ring-[#4F5D2F]"
+                        />
+                      </div>
+                      <div className="sm:col-span-2">
+                        <div className="flex justify-between items-center">
+                          <label className="text-[10px] text-[#6E6E63] font-medium">Institution / University</label>
+                          <button
+                            onClick={() => handleRemoveEducation(eduIdx)}
+                            className="text-[#6E6E63] hover:text-rose-600 transition p-0.5"
+                            title="Remove Education"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                        <input
+                          type="text"
+                          value={edu.institution}
+                          onChange={(e) => {
+                            const updated = { ...formData };
+                            updated.education[eduIdx].institution = e.target.value;
+                            setFormData(updated);
+                          }}
+                          className="w-full mt-0.5 px-2 py-1 bg-white border border-[#D5D2C7] rounded text-[#171713] text-xs focus:outline-none focus:ring-1 focus:ring-[#4F5D2F]"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[10px] text-[#6E6E63] font-medium">Field of Study</label>
+                        <input
+                          type="text"
+                          value={edu.fieldOfStudy || ''}
+                          onChange={(e) => {
+                            const updated = { ...formData };
+                            updated.education[eduIdx].fieldOfStudy = e.target.value;
+                            setFormData(updated);
+                          }}
+                          className="w-full mt-0.5 px-2 py-1 bg-white border border-[#D5D2C7] rounded text-[#171713] text-xs focus:outline-none focus:ring-1 focus:ring-[#4F5D2F]"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[10px] text-[#6E6E63] font-medium">GPA / Honors</label>
+                        <input
+                          type="text"
+                          value={edu.gpa || ''}
+                          onChange={(e) => {
+                            const updated = { ...formData };
+                            updated.education[eduIdx].gpa = e.target.value;
+                            setFormData(updated);
+                          }}
+                          placeholder="e.g. 3.8/4.0"
+                          className="w-full mt-0.5 px-2 py-1 bg-white border border-[#D5D2C7] rounded text-[#171713] text-xs focus:outline-none focus:ring-1 focus:ring-[#4F5D2F]"
+                        />
+                      </div>
+                      <div className="sm:col-span-2">
+                        <label className="text-[10px] text-[#6E6E63] font-medium">Dates (Start - End)</label>
+                        <input
+                          type="text"
+                          value={`${edu.startDate || ''} - ${edu.endDate || ''}`}
+                          onChange={(e) => {
+                            const updated = { ...formData };
+                            const [s, end] = e.target.value.split('-');
+                            updated.education[eduIdx].startDate = s?.trim() || edu.startDate;
+                            updated.education[eduIdx].endDate = end?.trim() || edu.endDate;
+                            setFormData(updated);
+                          }}
+                          placeholder="2018 - 2022"
+                          className="w-full mt-0.5 px-2 py-1 bg-white border border-[#D5D2C7] rounded text-[#171713] text-xs focus:outline-none focus:ring-1 focus:ring-[#4F5D2F]"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Section 6: Projects */}
+          <div className="p-4 rounded-xl bg-white border border-[#EAE8E1] shadow-xs space-y-4">
+            <div className="flex justify-between items-center">
+              <div
+                className="flex items-center gap-2 cursor-pointer select-none"
+                onClick={() => toggleSection('projects')}
+              >
+                <h3 className="text-xs font-bold text-[#171713] uppercase tracking-wider">
+                  Technical Projects ({(formData.projects || []).length})
+                </h3>
+                {collapsedSections.projects ? (
+                  <ChevronDown className="w-4 h-4 text-[#6E6E63]" />
+                ) : (
+                  <ChevronUp className="w-4 h-4 text-[#6E6E63]" />
+                )}
+              </div>
+              <button
+                onClick={handleAddProject}
+                className="px-2.5 py-1 rounded bg-[#FAF9F5] hover:bg-white text-[#171713] text-[11px] font-semibold border border-[#D5D2C7] flex items-center gap-1 transition shadow-2xs"
+              >
+                <Plus className="w-3 h-3 text-[#4F5D2F]" />
+                <span>Add Project</span>
+              </button>
+            </div>
+
+            {!collapsedSections.projects && (
+              <div className="space-y-3">
+                {(formData.projects || []).map((proj, projIdx) => (
+                  <div key={proj.id} className="p-4 rounded-lg bg-[#FAF9F5] border border-[#EAE8E1] space-y-3">
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
+                      <div className="sm:col-span-2">
+                        <label className="text-[10px] text-[#6E6E63] font-medium">Project Name</label>
+                        <input
+                          type="text"
+                          value={proj.title}
+                          onChange={(e) => {
+                            const updated = { ...formData };
+                            updated.projects[projIdx].title = e.target.value;
+                            setFormData(updated);
+                          }}
+                          className="w-full mt-0.5 px-2 py-1 bg-white border border-[#D5D2C7] rounded text-[#171713] text-xs focus:outline-none focus:ring-1 focus:ring-[#4F5D2F]"
+                        />
+                      </div>
+                      <div className="sm:col-span-2">
+                        <div className="flex justify-between items-center">
+                          <label className="text-[10px] text-[#6E6E63] font-medium">Link / URL</label>
+                          <button
+                            onClick={() => handleRemoveProject(projIdx)}
+                            className="text-[#6E6E63] hover:text-rose-600 transition p-0.5"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                        <input
+                          type="text"
+                          value={proj.link || ''}
+                          onChange={(e) => {
+                            const updated = { ...formData };
+                            updated.projects[projIdx].link = e.target.value;
+                            setFormData(updated);
+                          }}
+                          placeholder="https://..."
+                          className="w-full mt-0.5 px-2 py-1 bg-white border border-[#D5D2C7] rounded text-[#171713] text-xs focus:outline-none focus:ring-1 focus:ring-[#4F5D2F]"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Bullets */}
+                    <div className="space-y-2 pt-1">
+                      <div className="flex justify-between items-center text-[11px] text-[#6E6E63]">
+                        <span>Project Bullets</span>
+                        <button
+                          onClick={() => handleAddProjectBullet(projIdx)}
+                          className="text-[#4F5D2F] hover:underline font-semibold flex items-center gap-0.5"
+                        >
+                          <Plus className="w-3 h-3" /> Add bullet
+                        </button>
+                      </div>
+                      {(proj.bullets || []).map((bullet, bIdx) => (
+                        <div key={bIdx} className="flex items-start gap-2">
+                          <textarea
+                            rows={2}
+                            value={bullet}
+                            onChange={(e) => {
+                              const updated = { ...formData };
+                              updated.projects[projIdx].bullets[bIdx] = e.target.value;
+                              setFormData(updated);
+                            }}
+                            className="w-full px-2.5 py-1.5 text-xs bg-white border border-[#D5D2C7] rounded-lg text-[#171713] focus:outline-none focus:ring-1 focus:ring-[#4F5D2F]"
+                          />
+                          {(proj.bullets || []).length > 1 && (
+                            <button
+                              onClick={() => handleRemoveProjectBullet(projIdx, bIdx)}
+                              className="p-1 rounded text-[#6E6E63] hover:text-rose-600 hover:bg-rose-50 transition"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Section 7: Certifications */}
+          <div className="p-4 rounded-xl bg-white border border-[#EAE8E1] shadow-xs space-y-4">
+            <div className="flex justify-between items-center">
+              <div
+                className="flex items-center gap-2 cursor-pointer select-none"
+                onClick={() => toggleSection('certifications')}
+              >
+                <h3 className="text-xs font-bold text-[#171713] uppercase tracking-wider">
+                  Certifications ({(formData.certifications || []).length})
+                </h3>
+                {collapsedSections.certifications ? (
+                  <ChevronDown className="w-4 h-4 text-[#6E6E63]" />
+                ) : (
+                  <ChevronUp className="w-4 h-4 text-[#6E6E63]" />
+                )}
+              </div>
+              <button
+                onClick={handleAddCertification}
+                className="px-2.5 py-1 rounded bg-[#FAF9F5] hover:bg-white text-[#171713] text-[11px] font-semibold border border-[#D5D2C7] flex items-center gap-1 transition shadow-2xs"
+              >
+                <Plus className="w-3 h-3 text-[#4F5D2F]" />
+                <span>Add Certificate</span>
+              </button>
+            </div>
+
+            {!collapsedSections.certifications && (
+              <div className="space-y-3">
+                {(formData.certifications || []).map((cert, cIdx) => (
+                  <div key={cert.id} className="p-3 rounded-lg bg-[#FAF9F5] border border-[#EAE8E1] space-y-2">
+                    <div className="grid grid-cols-3 gap-2 text-xs">
+                      <div>
+                        <label className="text-[10px] text-[#6E6E63] font-medium">Name</label>
+                        <input
+                          type="text"
+                          value={cert.name}
+                          onChange={(e) => {
+                            const updated = { ...formData };
+                            if (!updated.certifications) updated.certifications = [];
+                            updated.certifications[cIdx].name = e.target.value;
+                            setFormData(updated);
+                          }}
+                          className="w-full mt-0.5 px-2 py-1 bg-white border border-[#D5D2C7] rounded text-[#171713] text-xs focus:outline-none focus:ring-1 focus:ring-[#4F5D2F]"
+                        />
+                      </div>
+                      <div>
+                        <label className="text-[10px] text-[#6E6E63] font-medium">Issuer</label>
+                        <input
+                          type="text"
+                          value={cert.issuer}
+                          onChange={(e) => {
+                            const updated = { ...formData };
+                            if (!updated.certifications) updated.certifications = [];
+                            updated.certifications[cIdx].issuer = e.target.value;
+                            setFormData(updated);
+                          }}
+                          className="w-full mt-0.5 px-2 py-1 bg-white border border-[#D5D2C7] rounded text-[#171713] text-xs focus:outline-none focus:ring-1 focus:ring-[#4F5D2F]"
+                        />
+                      </div>
+                      <div>
+                        <div className="flex justify-between items-center">
+                          <label className="text-[10px] text-[#6E6E63] font-medium">Date</label>
+                          <button
+                            onClick={() => handleRemoveCertification(cIdx)}
+                            className="text-[#6E6E63] hover:text-rose-600 transition"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                        <input
+                          type="text"
+                          value={cert.date}
+                          onChange={(e) => {
+                            const updated = { ...formData };
+                            if (!updated.certifications) updated.certifications = [];
+                            updated.certifications[cIdx].date = e.target.value;
+                            setFormData(updated);
+                          }}
+                          className="w-full mt-0.5 px-2 py-1 bg-white border border-[#D5D2C7] rounded text-[#171713] text-xs focus:outline-none focus:ring-1 focus:ring-[#4F5D2F]"
+                        />
+                      </div>
                     </div>
                   </div>
                 ))}

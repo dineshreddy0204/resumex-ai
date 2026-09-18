@@ -17,8 +17,35 @@ import type {
 class ApiClient {
   private csrfToken: string | null = null;
 
+  private authToken: string | null = null;
+
   constructor() {
-    // Cookie-only architecture: session is maintained exclusively via secure HttpOnly cookies
+    if (typeof window !== 'undefined') {
+      try {
+        this.authToken = sessionStorage.getItem('resumex_auth_token');
+      } catch {
+        this.authToken = null;
+      }
+    }
+  }
+
+  public setAuthToken(token: string | null | undefined): void {
+    this.authToken = token || null;
+    if (typeof window !== 'undefined') {
+      try {
+        if (token) {
+          sessionStorage.setItem('resumex_auth_token', token);
+        } else {
+          sessionStorage.removeItem('resumex_auth_token');
+        }
+      } catch {
+        // Storage quota / sandbox isolation fallback
+      }
+    }
+  }
+
+  public getAuthToken(): string | null {
+    return this.authToken;
   }
 
   private getCsrfFromCookie(): string | null {
@@ -47,6 +74,11 @@ class ApiClient {
       headers.set('Content-Type', 'application/json');
     }
 
+    // Attach Bearer token when available (guarantees session persistence across partitioned iframes)
+    if (this.authToken && !headers.has('Authorization')) {
+      headers.set('Authorization', `Bearer ${this.authToken}`);
+    }
+
     // Attach CSRF token on mutating requests
     const method = (options.method || 'GET').toUpperCase();
     if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
@@ -56,13 +88,31 @@ class ApiClient {
       }
     }
 
-    const response = await fetch(`/api${endpoint}`, {
-      credentials: 'include', // Transmits secure HttpOnly session cookies across environments
-      ...options,
-      headers,
-    });
+    let response: Response;
+    try {
+      response = await fetch(`/api${endpoint}`, {
+        credentials: 'include', // Transmits secure HttpOnly session cookies across environments
+        ...options,
+        headers,
+      });
+    } catch (networkErr) {
+      // Transient reload retry for idempotent GET requests
+      if (method === 'GET') {
+        await new Promise((resolve) => setTimeout(resolve, 350));
+        response = await fetch(`/api${endpoint}`, {
+          credentials: 'include',
+          ...options,
+          headers,
+        });
+      } else {
+        throw networkErr;
+      }
+    }
 
     if (!response.ok) {
+      if (response.status === 401) {
+        this.setAuthToken(null);
+      }
       const errorData = await response.json().catch(() => ({ error: 'Request failed' }));
       const message =
         errorData && errorData.error && typeof errorData.error === 'object'
@@ -75,17 +125,25 @@ class ApiClient {
   }
 
   // --- Auth ---
-  public async demoLogin(): Promise<{ user: User; profile: UserProfile }> {
-    return this.request<{ user: User; profile: UserProfile }>('/auth/demo-login', {
+  public async demoLogin(): Promise<{ user: User; profile: UserProfile; token?: string }> {
+    const res = await this.request<{ user: User; profile: UserProfile; token?: string }>('/auth/demo-login', {
       method: 'POST',
     });
+    if (res.token) {
+      this.setAuthToken(res.token);
+    }
+    return res;
   }
 
-  public async login(email: string, password: string): Promise<{ user: User; profile: UserProfile }> {
-    return this.request<{ user: User; profile: UserProfile }>('/auth/login', {
+  public async login(email: string, password: string): Promise<{ user: User; profile: UserProfile; token?: string }> {
+    const res = await this.request<{ user: User; profile: UserProfile; token?: string }>('/auth/login', {
       method: 'POST',
       body: JSON.stringify({ email, password }),
     });
+    if (res.token) {
+      this.setAuthToken(res.token);
+    }
+    return res;
   }
 
   public async signup(
@@ -98,31 +156,45 @@ class ApiClient {
     requiresVerification?: boolean;
     message?: string;
     devVerificationUrl?: string;
+    token?: string;
   }> {
-    return this.request<{
+    const res = await this.request<{
       user: User;
       profile?: UserProfile;
       requiresVerification?: boolean;
       message?: string;
       devVerificationUrl?: string;
+      token?: string;
     }>('/auth/signup', {
       method: 'POST',
       body: JSON.stringify({ name, email, password }),
     });
+    if (res.token) {
+      this.setAuthToken(res.token);
+    }
+    return res;
   }
 
-  public async verifyEmail(token: string): Promise<{ user: User; profile: UserProfile; message?: string }> {
-    return this.request<{ user: User; profile: UserProfile; message?: string }>('/auth/verify-email', {
+  public async verifyEmail(token: string): Promise<{ user: User; profile: UserProfile; message?: string; token?: string }> {
+    const res = await this.request<{ user: User; profile: UserProfile; message?: string; token?: string }>('/auth/verify-email', {
       method: 'POST',
       body: JSON.stringify({ token }),
     });
+    if (res.token) {
+      this.setAuthToken(res.token);
+    }
+    return res;
   }
 
-  public async googleAuth(idToken: string): Promise<{ user: User; profile: UserProfile }> {
-    return this.request<{ user: User; profile: UserProfile }>('/auth/google', {
+  public async googleAuth(idToken: string): Promise<{ user: User; profile: UserProfile; token?: string }> {
+    const res = await this.request<{ user: User; profile: UserProfile; token?: string }>('/auth/google', {
       method: 'POST',
       body: JSON.stringify({ idToken, credential: idToken }),
     });
+    if (res.token) {
+      this.setAuthToken(res.token);
+    }
+    return res;
   }
 
   public async forgotPassword(email: string): Promise<{ message: string; resetToken?: string; expiresAt?: string }> {
@@ -166,6 +238,7 @@ class ApiClient {
   }
 
   public async logout(): Promise<void> {
+    this.setAuthToken(null);
     try {
       await this.request('/auth/logout', { method: 'POST' });
     } catch {

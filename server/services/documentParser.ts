@@ -1,24 +1,7 @@
 import mammoth from 'mammoth';
-import { createRequire } from 'module';
+import zlib from 'zlib';
+import { PDFParse } from 'pdf-parse';
 import { getGeminiClient, isGeminiAvailable, getGeminiModel } from '../gemini';
-
-const getRequire = () => {
-  if (typeof createRequire === 'function') {
-    try {
-      const metaUrl = typeof import.meta !== 'undefined' && import.meta?.url ? import.meta.url : `file://${process.cwd()}/`;
-      return createRequire(metaUrl);
-    } catch {
-      // Fallback
-    }
-  }
-  if (typeof require === 'function') {
-    return require;
-  }
-  return null;
-};
-
-const reqFn = getRequire();
-const pdfParse = reqFn ? reqFn('pdf-parse') : null;
 
 export interface ParsedDocumentResult {
   text: string;
@@ -220,22 +203,36 @@ export class DocumentParser {
         extractedText = buffer.toString('utf-8');
       }
     } else if (mimeType.includes('pdf') || fileName?.endsWith('.pdf')) {
+      // 1. Primary extraction via PDFParse
       try {
-        const pdfData = await pdfParse(buffer);
-        extractedText = pdfData.text || '';
-        pageCount = pdfData.numpages || 1;
+        const parser = new PDFParse({ data: buffer });
+        const pdfData = await parser.getText();
+        extractedText = pdfData?.text || '';
+        pageCount = pdfData?.total || 1;
+        await parser.destroy();
       } catch (pdfErr) {
-        console.warn('pdf-parse primary parser error, using stream fallback:', pdfErr);
-        extractedText = this.extractPdfTextFallback(buffer);
+        console.warn('pdf-parse primary parser error, falling back to stream decompressor:', pdfErr);
       }
 
-      // OCR Fallback Pipeline check
+      // 2. Secondary fallback: direct decompression of PDF FlateDecode streams
+      if (!extractedText || extractedText.trim().length < 40) {
+        try {
+          const streamText = this.extractPdfTextFromStreams(buffer);
+          if (streamText && streamText.trim().length >= 40) {
+            extractedText = streamText;
+          }
+        } catch (streamErr) {
+          console.warn('Stream decompressor error:', streamErr);
+        }
+      }
+
+      // 3. Multimodal Vision OCR fallback for image-only/scanned PDFs
       if (!extractedText || extractedText.trim().length < 40) {
         ocrTriggered = true;
         extractedText = await this.performOcrFallback(buffer);
       }
     } else {
-      // Default to UTF-8
+      // Default to UTF-8 text
       extractedText = buffer.toString('utf-8');
     }
 
@@ -244,7 +241,7 @@ export class DocumentParser {
 
     if (!cleanedText || cleanedText.length === 0) {
       throw new Error(
-        'The uploaded document contains no extractable text. Please ensure it is a digital PDF or DOCX file rather than a scanned image.'
+        'Could not extract resume data. Please review the uploaded document.'
       );
     }
 
@@ -265,13 +262,7 @@ export class DocumentParser {
    * for image-only or scanned PDFs lacking a selectable text layer.
    */
   private async performOcrFallback(buffer: Buffer): Promise<string> {
-    // 1. Check if buffer contains stream text
-    const fallbackText = this.extractPdfTextFallback(buffer);
-    if (fallbackText && fallbackText.trim().length > 60) {
-      return fallbackText;
-    }
-
-    // 2. Multimodal OCR via Gemini
+    // 1. Multimodal OCR via Gemini
     if (isGeminiAvailable()) {
       try {
         const client = getGeminiClient();
@@ -305,62 +296,83 @@ export class DocumentParser {
       }
     }
 
-    // 3. Fail gracefully if unreadable
+    // 2. Fail gracefully if unreadable — DO NOT return binary bytecode or dummy data!
     throw new Error(
-      'The uploaded document has no extractable text layer and automated OCR could not transcribe it. Please upload a digital PDF or DOCX exported directly from a word processor.'
+      'Unable to extract readable text from this PDF. Please ensure your PDF is not an image-only scan, or upload a DOCX file or build your resume manually.'
     );
   }
 
   /**
-   * Safe text extraction from PDF stream chunks
+   * Safe text extraction from decompressed PDF stream chunks (FlateDecode)
    */
-  public extractPdfTextFallback(buffer: Buffer): string {
+  public extractPdfTextFromStreams(buffer: Buffer): string {
     const raw = buffer.toString('latin1');
     const textPieces: string[] = [];
 
-    // Look for BT ... ET stream blocks (standard PDF text representation)
-    const streamRegex = /BT\s*([\s\S]*?)\s*ET/g;
+    // Find all stream ... endstream blocks in PDF
+    const streamRegex = /stream\r?\n([\s\S]*?)\r?\nendstream/g;
     let match;
     while ((match = streamRegex.exec(raw)) !== null) {
-      const block = match[1];
-      // Extract string literals in parentheses (text) or hex <...>
-      const strRegex = /\((.*?)\)\s*T[jJ]|\<([0-9a-fA-F]+)\>\s*T[jJ]/g;
-      let textMatch;
-      while ((textMatch = strRegex.exec(block)) !== null) {
-        if (textMatch[1]) {
-          // unescape standard PDF escape characters
-          const unescaped = textMatch[1]
+      const rawStream = Buffer.from(match[1], 'latin1');
+      let decompressed = '';
+      try {
+        decompressed = zlib.inflateSync(rawStream).toString('latin1');
+      } catch {
+        try {
+          decompressed = zlib.inflateRawSync(rawStream).toString('latin1');
+        } catch {
+          decompressed = rawStream.toString('latin1');
+        }
+      }
+
+      // Extract Tj text operator (string in parentheses)
+      const tjRegex = /\(((?:[^()\\]|\\.)*)\)\s*T[jJ]/g;
+      let tjMatch;
+      while ((tjMatch = tjRegex.exec(decompressed)) !== null) {
+        const unescaped = tjMatch[1]
+          .replace(/\\([0-7]{3})/g, (_, oct) => String.fromCharCode(parseInt(oct, 8)))
+          .replace(/\\n/g, '\n')
+          .replace(/\\r/g, '\r')
+          .replace(/\\t/g, '\t')
+          .replace(/\\\(/g, '(')
+          .replace(/\\\)/g, ')')
+          .replace(/\\\\/g, '\\');
+        if (unescaped.trim().length > 0) {
+          textPieces.push(unescaped);
+        }
+      }
+
+      // Extract TJ array text operator [ (text) -10 (more) ] TJ
+      const arrayRegex = /\[(.*?)\]\s*TJ/gi;
+      let arrMatch;
+      while ((arrMatch = arrayRegex.exec(decompressed)) !== null) {
+        const subTj = /\(((?:[^()\\]|\\.)*)\)/g;
+        let sMatch;
+        let subPiece = '';
+        while ((sMatch = subTj.exec(arrMatch[1])) !== null) {
+          subPiece += sMatch[1]
+            .replace(/\\([0-7]{3})/g, (_, oct) => String.fromCharCode(parseInt(oct, 8)))
             .replace(/\\n/g, '\n')
             .replace(/\\r/g, '\r')
             .replace(/\\t/g, '\t')
             .replace(/\\\(/g, '(')
             .replace(/\\\)/g, ')')
             .replace(/\\\\/g, '\\');
-          textPieces.push(unescaped);
-        } else if (textMatch[2]) {
-          // Hex string
-          try {
-            const hexBuf = Buffer.from(textMatch[2], 'hex');
-            textPieces.push(hexBuf.toString('utf-8'));
-          } catch {
-            // ignore
-          }
+        }
+        if (subPiece.trim().length > 0) {
+          textPieces.push(subPiece);
         }
       }
     }
 
     if (textPieces.length > 0) {
-      return textPieces.join(' ').replace(/\s{2,}/g, ' ');
+      const joined = textPieces.join(' ').replace(/\s{2,}/g, ' ').trim();
+      if (joined.length >= 40) {
+        return joined;
+      }
     }
 
-    // Fallback: extract any printable strings longer than 3 chars
-    const printable = raw.replace(/[^\x20-\x7E\n\r\t]/g, ' ');
-    const sanitized = printable.replace(/\s{2,}/g, ' ').trim();
-    if (sanitized.length > 50) {
-      return sanitized;
-    }
-
-    throw new Error('Scanned document detected: PDF contains no digital text layer. OCR or digital PDF required.');
+    return '';
   }
 
   /**

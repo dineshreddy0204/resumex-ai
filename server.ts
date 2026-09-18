@@ -4,7 +4,7 @@ import { apiRouter } from './server/api';
 
 async function startServer() {
   const app = express();
-  const PORT = Number(process.env.PORT) || 3000;
+  const PORT = 3000;
   const HOST = '0.0.0.0';
 
   // Trust proxy for reverse proxies (e.g. Cloud Run, Nginx, ALB)

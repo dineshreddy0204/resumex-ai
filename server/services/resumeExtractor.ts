@@ -61,21 +61,31 @@ export class ResumeExtractor {
   ): ResumeData['personal_info'] {
     // Look in header section or first 12 lines
     const headerSection = sections.find((s) => s.standardName === 'header');
-    const searchLines = headerSection ? headerSection.content : lines.slice(0, 10);
+    const searchLines = headerSection ? headerSection.content : lines.slice(0, 12);
     const searchBlock = searchLines.join(' \n ');
 
-    // Name detection: usually line 0 or line with only 2-3 capitalized words, not an email/phone/url
+    const forbiddenTokens = [
+      'curriculum', 'vitae', 'resume', 'cv', 'page', 'profile', 'contact', 'email', 'phone', 'summary',
+      'experience', 'education', 'skills', 'objective', 'type', 'xobject', 'subtype', 'image', 'font',
+      'stream', 'endstream', 'obj', 'endobj', 'trailer', 'xref', 'catalog', 'pages', 'flatedecode',
+      'candidate', 'portfolio', 'developer', 'engineer', 'architect', 'manager'
+    ];
+
+    // Name detection: usually line 0 or line with only 2-4 capitalized words, not an email/phone/url
     let name = '';
     for (const l of searchLines) {
-      const clean = l.replace(/[^a-zA-Z\s]/g, '').trim();
-      const words = clean.split(/\s+/);
+      const trimmed = l.trim();
+      if (!trimmed || trimmed.includes('@') || trimmed.includes('http') || trimmed.includes('www.')) continue;
+      
+      const lower = trimmed.toLowerCase();
+      if (forbiddenTokens.some((tok) => lower.split(/\s+/).includes(tok))) continue;
+
+      const clean = trimmed.replace(/[^a-zA-Z\s'-]/g, '').trim();
+      const words = clean.split(/\s+/).filter(Boolean);
       if (
         words.length >= 2 &&
         words.length <= 4 &&
-        !l.includes('@') &&
-        !l.toLowerCase().includes('curriculum') &&
-        !l.toLowerCase().includes('resume') &&
-        !l.toLowerCase().includes('http')
+        words.every((w) => /^[A-Z][a-zA-Z'-]*$/.test(w))
       ) {
         name = clean;
         provenance.push({
@@ -100,16 +110,22 @@ export class ResumeExtractor {
       });
     }
 
-    // Phone
-    const phoneMatch = searchBlock.match(/(?:\+?\d{1,3}[\s-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/);
-    const phone = phoneMatch ? phoneMatch[0] : '';
-    if (phone) {
-      provenance.push({
-        field: 'personal_info.phone',
-        sourceText: phone,
-        section: 'header',
-        confidence: 0.96,
-      });
+    // Phone - must have diversity of digits (exclude repeat-dummy patterns like 4444444444444)
+    const phoneMatches = searchBlock.match(/(?:\+?\d{1,3}[\s-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/g) || [];
+    let phone = '';
+    for (const p of phoneMatches) {
+      const digitsOnly = p.replace(/\D/g, '');
+      const uniqueDigits = new Set(digitsOnly.split(''));
+      if (digitsOnly.length >= 10 && digitsOnly.length <= 15 && uniqueDigits.size >= 3) {
+        phone = p;
+        provenance.push({
+          field: 'personal_info.phone',
+          sourceText: phone,
+          section: 'header',
+          confidence: 0.96,
+        });
+        break;
+      }
     }
 
     // LinkedIn
@@ -124,17 +140,20 @@ export class ResumeExtractor {
     const portfolioMatch = searchBlock.match(/(?:https?:\/\/)(?!linkedin|github)[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}[^\s]*/i);
     const portfolio = portfolioMatch ? portfolioMatch[0] : '';
 
-    // Location: look for City, State / Country pattern e.g., "San Francisco, CA" or "New York, NY"
+    // Location: look for City, State / Country pattern e.g., "San Francisco, CA" or "Austin, TX"
     let location = '';
     const locMatch = searchBlock.match(/([A-Z][a-zA-Z\s]+,\s*[A-Z]{2}(?:\s+\d{5})?|[A-Z][a-zA-Z\s]+,\s*[A-Z][a-zA-Z]+)/);
     if (locMatch) {
-      location = locMatch[0].trim();
-      provenance.push({
-        field: 'personal_info.location',
-        sourceText: location,
-        section: 'header',
-        confidence: 0.9,
-      });
+      const candidateLoc = locMatch[0].trim();
+      if (!forbiddenTokens.some((tok) => candidateLoc.toLowerCase().includes(tok))) {
+        location = candidateLoc;
+        provenance.push({
+          field: 'personal_info.location',
+          sourceText: location,
+          section: 'header',
+          confidence: 0.9,
+        });
+      }
     }
 
     return { name, email, phone, location, linkedin, github, portfolio };
@@ -251,31 +270,62 @@ export class ResumeExtractor {
     const items: ResumeData['education'] = [];
     let currentEdu: ResumeData['education'][0] | null = null;
 
-    const degreeKeywords = /(?:Bachelor|Master|B\.S\.|M\.S\.|Ph\.D\.|B\.A\.|M\.A\.|Associate|Diploma|Doctorate)/i;
+    const degreeKeywords = /(?:Bachelor|Master|Doctor|Ph\.?D|B\.?S\.?|M\.?S\.?|B\.?A\.?|M\.?A\.?|B\.?Tech|M\.?Tech|B\.?E\.?|M\.?E\.?|BCA|MCA|BBA|MBA|Associate|Diploma)/i;
     const dateRegex = /\b(19\d{2}|20\d{2})\b/g;
+    const instKeywords = /(?:University|College|Institute|School|Academy|Polytechnic|UC\s+[A-Z][a-z]+|MIT|Stanford|Harvard|Berkeley)/i;
 
     for (const line of eduSec.content) {
       const isDegreeLine = degreeKeywords.test(line);
+      const isInstLine = instKeywords.test(line);
       const dates = line.match(dateRegex);
 
-      if (isDegreeLine || (dates && !currentEdu)) {
+      if (isDegreeLine) {
         if (currentEdu) {
           items.push(currentEdu);
         }
-        const degMatch = line.match(degreeKeywords);
-        const degree = degMatch ? line.trim() : '';
+
+        let degreePart = line;
+        let instPart = '';
+
+        // Check for common separators: " - ", " – ", " — ", " | ", ", "
+        const parts = line.split(/\s*(?:–|—|-|\|)\s*/);
+        if (parts.length >= 2) {
+          const degIdx = parts.findIndex((p) => degreeKeywords.test(p));
+          if (degIdx !== -1) {
+            degreePart = parts[degIdx];
+            const otherParts = parts.filter(
+              (p, idx) =>
+                idx !== degIdx &&
+                !/^\s*(?:19\d{2}|20\d{2}|Present)\s*$/i.test(p) &&
+                !/^\s*(?:19\d{2}|20\d{2})\s*[-–—to]\s*(?:19\d{2}|20\d{2}|Present)\s*$/i.test(p)
+            );
+            instPart = otherParts.join(', ');
+          }
+        }
+
+        // Clean dates from degree and institution strings
+        degreePart = degreePart.replace(/\(\s*\d{4}.*?\)/g, '').replace(/\b\d{4}\s*[-–—to]\s*\d{4}\b/g, '').replace(/^[,\s]+|[,\s]+$/g, '').trim();
+        instPart = instPart.replace(/\(\s*\d{4}.*?\)/g, '').replace(/\b\d{4}\s*[-–—to]\s*\d{4}\b/g, '').replace(/^[,\s]+|[,\s]+$/g, '').trim();
+
+        // Field of study extraction (e.g. "in Computer Science")
+        const fieldMatch = degreePart.match(/(?:in|of)\s+([A-Za-z\s&]+)/i);
+        const fieldOfStudy = fieldMatch ? fieldMatch[1].trim() : undefined;
+
         currentEdu = {
           id: `edu-${items.length + 1}`,
-          institution: '',
-          degree: degree,
+          institution: instPart,
+          degree: degreePart,
+          fieldOfStudy: fieldOfStudy,
           startDate: dates && dates[0] ? dates[0] : '',
           endDate: dates && dates[1] ? dates[1] : (dates && dates[0] ? dates[0] : ''),
         };
+      } else if (isInstLine && currentEdu && !currentEdu.institution) {
+        currentEdu.institution = line.replace(/\(\s*\d{4}.*?\)/g, '').replace(/\b\d{4}\s*[-–—to]\s*\d{4}\b/g, '').trim();
       } else if (currentEdu) {
-        if (line.toLowerCase().includes('university') || line.toLowerCase().includes('college') || line.toLowerCase().includes('institute')) {
+        if (instKeywords.test(line) && !currentEdu.institution) {
           currentEdu.institution = line.trim();
-        } else if (line.toLowerCase().includes('gpa')) {
-          const gpaMatch = line.match(/gpa[:\s]*([0-4]\.\d{1,2})/i);
+        } else if (/gpa|cgpa/i.test(line)) {
+          const gpaMatch = line.match(/(?:gpa|cgpa)[:\s]*([0-9]\.?[0-9]*)/i);
           if (gpaMatch) currentEdu.gpa = gpaMatch[1];
         }
       }
@@ -289,7 +339,7 @@ export class ResumeExtractor {
       items.push({
         id: 'edu-1',
         institution: eduSec.content[0] || '',
-        degree: eduSec.content[1] || '',
+        degree: eduSec.content[1] || eduSec.content[0] || '',
         startDate: '',
         endDate: '',
       });
@@ -424,31 +474,66 @@ export class ResumeExtractor {
     provenance: ExtractedProvenance[]
   ): ResumeData['skills'] {
     const skillsSec = sections.find((s) => s.standardName === 'skills');
-    const targetText = skillsSec ? skillsSec.content.join(' \n ') : rawText;
-
-    const extracted = skillExtractor.extractSkills(targetText);
-
-    // Group by categories
     const categoryMap = new Map<string, Set<string>>();
 
-    for (const item of extracted) {
-      if (!categoryMap.has(item.category)) {
-        categoryMap.set(item.category, new Set());
+    // 1. If explicit category lines exist in Skills section (e.g. "Languages: Python, Go, C++")
+    if (skillsSec) {
+      for (const line of skillsSec.content) {
+        const catMatch = line.match(/^([A-Za-z\s&/]+)[:\-]\s*(.+)$/);
+        if (catMatch && catMatch[1].trim().length > 2 && catMatch[2].trim().length > 0) {
+          const category = catMatch[1].trim();
+          const items = catMatch[2]
+            .split(/[,•|·/]/)
+            .map((s) => s.trim())
+            .filter((s) => s.length > 0 && s.length < 35);
+          
+          if (items.length > 0) {
+            if (!categoryMap.has(category)) {
+              categoryMap.set(category, new Set());
+            }
+            for (const item of items) {
+              categoryMap.get(category)!.add(item);
+            }
+          }
+        }
       }
-      categoryMap.get(item.category)!.add(item.normalizedName);
+    }
+
+    // 2. Supplement with skillExtractor ontology mapping across target text
+    const targetText = skillsSec ? skillsSec.content.join(' \n ') : rawText;
+    const extracted = skillExtractor.extractSkills(targetText);
+
+    for (const item of extracted) {
+      // If item is not already present in any category
+      let alreadyPresent = false;
+      for (const set of categoryMap.values()) {
+        if (set.has(item.normalizedName) || set.has(item.name)) {
+          alreadyPresent = true;
+          break;
+        }
+      }
+      if (!alreadyPresent) {
+        const catName = item.category || 'Technical Skills';
+        if (!categoryMap.has(catName)) {
+          categoryMap.set(catName, new Set());
+        }
+        categoryMap.get(catName)!.add(item.normalizedName);
+      }
     }
 
     const result: ResumeData['skills'] = [];
     for (const [category, skillSet] of categoryMap.entries()) {
-      result.push({
-        category,
-        items: Array.from(skillSet),
-      });
+      if (skillSet.size > 0) {
+        result.push({
+          category,
+          items: Array.from(skillSet),
+        });
+      }
     }
 
     provenance.push({
       field: 'skills',
-      sourceText: `Extracted ${extracted.length} normalized skills across ${result.length} categories.`,
+      sourceText: `Extracted skills across ${result.length} categories.`,
       section: 'skills',
       confidence: 0.95,
     });

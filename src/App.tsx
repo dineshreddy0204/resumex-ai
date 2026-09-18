@@ -187,7 +187,8 @@ export default function App() {
           err.message.includes('TOKEN_INVALID') ||
           err.message.includes('expired or invalid') ||
           err.message.includes('session has been signed out') ||
-          err.message.includes('HTTP 401'));
+          err.message.includes('HTTP 401') ||
+          err.message.includes('401'));
 
       if (isAuthError) {
         // Reset auth state cleanly to transition to landing page without broken UI state
@@ -197,7 +198,7 @@ export default function App() {
         setResumes([]);
         api.logout().catch(() => {});
       } else {
-        console.error('Failed to load resumes:', err);
+        console.warn('Could not load resumes at this time:', err?.message || err);
       }
     }
   };
@@ -231,8 +232,8 @@ export default function App() {
       setActiveResume(res.resume);
       setIssues(res.issues);
       setAtsResult(res.atsAnalysis);
-      setActiveTab('ats-lab');
-      showToast('success', `Resume "${res.resume.title}" parsed with ${res.atsAnalysis.overallAtsScore}% ATS score.`);
+      setActiveTab('builder');
+      showToast('success', `Resume "${res.resume.title}" parsed and loaded into Live Builder (${res.atsAnalysis.overallAtsScore}% ATS score).`);
     } catch (err: any) {
       showToast('error', `Upload failed: ${err.message || 'Unknown error'}`);
     } finally {

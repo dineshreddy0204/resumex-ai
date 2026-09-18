@@ -43,12 +43,30 @@ import {
 export const apiRouter = express.Router();
 apiRouter.use(express.json({ limit: '15mb' }));
 
-// Global Security & Observability Headers
+// Global Security, Observability & CORS Headers
 apiRouter.use((req: Request, res: Response, next: NextFunction) => {
   const requestId = (req.headers['x-request-id'] as string) || crypto.randomUUID();
   res.setHeader('X-Request-Id', requestId);
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+
+  // Universal CORS & credentials reflection for cross-origin, reverse proxy & iframe preview environments
+  const origin = req.headers.origin;
+  if (origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
+    res.setHeader(
+      'Access-Control-Allow-Headers',
+      'Content-Type,Authorization,X-CSRF-Token,X-Request-Id,X-XSRF-Token'
+    );
+  }
+
+  // Answer preflight OPTIONS requests immediately
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+
   next();
 });
 
@@ -113,10 +131,10 @@ apiRouter.get('/health', async (_req: Request, res: Response) => {
 
 apiRouter.get('/auth/config', (_req: Request, res: Response) => {
   const isProd = process.env.NODE_ENV === 'production';
-  const enableDemo = process.env.ENABLE_DEMO_LOGIN === 'true';
+  const enableDemo = process.env.ENABLE_DEMO_LOGIN ? process.env.ENABLE_DEMO_LOGIN === 'true' : !isProd;
   const hasFirebaseConfig = fs.existsSync(path.resolve(process.cwd(), 'firebase-applet-config.json')) || Boolean(process.env.FIREBASE_PROJECT_ID);
   res.json({
-    demoLoginEnabled: !isProd && enableDemo,
+    demoLoginEnabled: enableDemo,
     googleAuthEnabled: hasFirebaseConfig || Boolean(process.env.GOOGLE_CLIENT_ID || process.env.VITE_GOOGLE_CLIENT_ID),
     authProvider: hasFirebaseConfig ? 'firebase' : 'google-oidc',
   });
@@ -212,6 +230,7 @@ apiRouter.post('/auth/verify-email', authRateLimiter, async (req: Request, res: 
         emailVerified: true,
       },
       profile,
+      token: authToken,
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Email verification failed.';
@@ -292,6 +311,7 @@ apiRouter.post('/auth/login', authRateLimiter, async (req: Request, res: Respons
         isDemo: user.isDemo,
       },
       profile,
+      token,
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Login failed.';
@@ -303,8 +323,8 @@ apiRouter.post('/auth/login', authRateLimiter, async (req: Request, res: Respons
 apiRouter.post('/auth/demo-login', async (req: Request, res: Response) => {
   try {
     const isProd = process.env.NODE_ENV === 'production';
-    const enableDemo = process.env.ENABLE_DEMO_LOGIN === 'true';
-    if (isProd || !enableDemo) {
+    const enableDemo = process.env.ENABLE_DEMO_LOGIN ? process.env.ENABLE_DEMO_LOGIN === 'true' : !isProd;
+    if (!enableDemo) {
       return sendStructuredError(res, 403, 'DEMO_LOGIN_DISABLED', 'Demo login is disabled in this environment.');
     }
 
@@ -333,6 +353,7 @@ apiRouter.post('/auth/demo-login', async (req: Request, res: Response) => {
         isDemo: true,
       },
       profile,
+      token,
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Demo login failed.';
@@ -385,6 +406,7 @@ apiRouter.post('/auth/google', authRateLimiter, async (req: Request, res: Respon
         emailVerified: true,
       },
       profile,
+      token,
     });
   } catch (err: unknown) {
     console.error('Google OAuth error:', err instanceof Error ? err.message : 'Verification failed');

@@ -51,8 +51,8 @@ export function hashToken(token: string): string {
 }
 
 /**
- * Extract token strictly from HttpOnly session cookie (resumex_token / resumex_session).
- * Absolute cookie-only authentication: Authorization Bearer is never accepted.
+ * Extract token from HttpOnly session cookie (resumex_token / resumex_session),
+ * with Authorization: Bearer fallback for iframe environments where third-party cookies are blocked.
  */
 export function extractToken(req: Request): string | null {
   const cookieHeader = req.headers.cookie;
@@ -61,6 +61,12 @@ export function extractToken(req: Request): string | null {
     if (match) {
       return decodeURIComponent(match[1]).trim();
     }
+  }
+
+  // Authorization: Bearer <token> fallback for cross-site / iframe sandboxes
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    return authHeader.substring(7).trim();
   }
 
   return null;
